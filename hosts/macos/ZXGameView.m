@@ -15,13 +15,8 @@
 
 #import <Cocoa/Cocoa.h>
 
-#import <CoreImage/CoreImage.h>
-
-#import <OpenGL/gl.h>
-#import <OpenGL/glext.h>
-#import <OpenGL/glu.h>
-
-#import <GLUT/glut.h>
+#import <Metal/Metal.h>
+#import <MetalKit/MetalKit.h>
 
 #import "ZXSpectrum/Spectrum.h"
 #import "ZXSpectrum/Keyboard.h"
@@ -53,6 +48,33 @@
 
 // -----------------------------------------------------------------------------
 
+// Draws the frame texture into the viewport as a four vertex strip.
+//
+static NSString *const shaderSource =
+  @"#include <metal_stdlib>\n"
+  @"using namespace metal;\n"
+  @"struct Out { float4 pos [[position]]; float2 uv; };\n"
+  @"vertex Out vert(uint vid [[vertex_id]])\n"
+  @"{\n"
+  @"  float2 p = float2((vid & 1) ? 1.0 : -1.0, (vid & 2) ? 1.0 : -1.0);\n"
+  @"  Out o;\n"
+  @"  o.pos = float4(p, 0.0, 1.0);\n"
+  @"  o.uv  = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);\n"
+  @"  return o;\n"
+  @"}\n"
+  @"fragment float4 frag(Out in [[stage_in]],\n"
+  @"                     texture2d<float> tex [[texture(0)]],\n"
+  @"                     constant uint &mono [[buffer(0)]])\n"
+  @"{\n"
+  @"  constexpr sampler s(filter::nearest);\n"
+  @"  float3 c = tex.sample(s, in.uv).rgb;\n"
+  @"  if (mono)\n"
+  @"    c = float3(dot(c, float3(0.299, 0.587, 0.114)));\n"
+  @"  return float4(c, 1.0);\n"
+  @"}\n";
+
+// -----------------------------------------------------------------------------
+
 #pragma mark - UIView
 
 @interface ZXGameView()
@@ -63,7 +85,11 @@
 
   pthread_t       thread;
 
-  BOOL            doSetupDrawing;
+  id<MTLCommandQueue>        queue;
+  id<MTLRenderPipelineState> pipeline;
+  id<MTLTexture>             texture;
+
+  MTLViewport     viewport;
   CGFloat         scale;
   int             borderSize;
   BOOL            snap;
@@ -86,7 +112,7 @@
   zxkeyset_t      keys;
   zxkempston_t    kempston;
 
-  GLclampf        backgroundRed, backgroundGreen, backgroundBlue;
+  double          backgroundRed, backgroundGreen, backgroundBlue;
 
   zxaudio_t      *audio;
 
@@ -103,23 +129,52 @@
 
 #pragma mark - Standard methods
 
-- (void)prepare
+- (BOOL)setupMetal
 {
-  // The GL context must be active for these functions to have an effect
-  [[self openGLContext] makeCurrentContext];
+  id<MTLDevice>         device;
+  id<MTLLibrary>        library;
+  MTLRenderPipelineDescriptor *desc;
+  MTLTextureDescriptor *texDesc;
+  NSError              *error;
 
-  // Configure the view
-  glShadeModel(GL_FLAT);
-  glDisable(GL_DEPTH_TEST);
+  device = MTLCreateSystemDefaultDevice();
+  if (device == nil)
+    return NO;
 
-  // Reset the projection matrix
-  glMatrixMode(GL_PROJECTION);
-  glLoadIdentity();
+  library = [device newLibraryWithSource:shaderSource options:nil error:&error];
+  if (library == nil)
+  {
+    NSLog(@"ZXGameView: shader: %@", error);
+    return NO;
+  }
 
-  // Reset the model view matrix
-  glMatrixMode(GL_MODELVIEW);
-  glLoadIdentity();
-  // glTranslatef(0.375, 0.375, 0);
+  desc = [[MTLRenderPipelineDescriptor alloc] init];
+  desc.vertexFunction                  = [library newFunctionWithName:@"vert"];
+  desc.fragmentFunction                = [library newFunctionWithName:@"frag"];
+  desc.colorAttachments[0].pixelFormat = self.colorPixelFormat;
+
+  pipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+  if (pipeline == nil)
+  {
+    NSLog(@"ZXGameView: pipeline: %@", error);
+    return NO;
+  }
+
+  // ZX_PIXEL_ABGR8888 is R,G,B,A in memory on little endian
+  texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                               width:GAMEWIDTH
+                                                              height:GAMEHEIGHT
+                                                           mipmapped:NO];
+  texture = [device newTextureWithDescriptor:texDesc];
+  queue   = [device newCommandQueue];
+
+  self.device = device;
+
+  // Draw only when asked to, from drawRect:
+  self.enableSetNeedsDisplay = YES;
+  self.paused                = YES;
+
+  return texture != nil && queue != nil;
 }
 
 - (void)awakeFromNib
@@ -135,7 +190,7 @@
     &border_handler,
     &speaker_handler,
     NULL, // ay_out
-    ZX_PIXEL_ABGR8888 // glDrawPixels(GL_RGBA, GL_UNSIGNED_BYTE) on little endian
+    ZX_PIXEL_ABGR8888 // MTLPixelFormatRGBA8Unorm on little endian
   };
 
   ops             = zxgame_macos_ops();
@@ -144,7 +199,6 @@
 
   thread          = NULL;
 
-  doSetupDrawing  = YES;
   borderSize      = GAMEBORDER;
   snap            = YES;
   monochromatic   = NO;
@@ -177,6 +231,9 @@
   if (game == NULL)
     goto failure;
 
+  if (![self setupMetal])
+    goto failure;
+
   audio = zxaudio_create();
 
   return;
@@ -188,19 +245,13 @@ failure:
   zxspectrum_destroy(zx);
 }
 
-- (void)update
-{
-  [super update];
-  doSetupDrawing = YES;
-}
-
 // -----------------------------------------------------------------------------
 
 - (void)start
 {
-  assert(self.delegate);
+  assert(self.gameDelegate);
 
-  startupGameURL = [self.delegate getStartupGame];
+  startupGameURL = [self.gameDelegate getStartupGame];
 
   pthread_create(&thread,
                  NULL, // pthread_attr_t
@@ -279,22 +330,8 @@ failure:
 // Simulate a black and white TV
 - (IBAction)toggleMonochromatic:(id)sender
 {
-  if (monochromatic)
-  {
-    self.contentFilters = @[];
-  }
-  else
-  {
-    CIFilter       *filter;
-    NSMutableArray *filters;
-
-    filter = [CIFilter filterWithName:@"CIPhotoEffectMono"];
-    [filter setDefaults];
-    filters = [NSMutableArray arrayWithObject:filter];
-    self.contentFilters = filters;
-  }
-
   monochromatic = !monochromatic;
+  [self setNeedsDisplay:YES];
 }
 
 // -----------------------------------------------------------------------------
@@ -484,10 +521,7 @@ failure:
   // (un)tick the menu entry
   [sender setState:snap ? NSControlStateValueOn : NSControlStateValueOff];
 
-  // invalidate drawing setup
-  doSetupDrawing = YES;
-
-  [self displayIfNeeded];
+  [self setNeedsDisplay:YES];
 }
 
 - (IBAction)toggleSound:(id)sender
@@ -500,25 +534,17 @@ failure:
 - (void)setupDrawing
 {
   CGSize  gameSize;
-  NSRect  baseRect;
   CGSize  viewSize;
   CGFloat gameWidthsPerView, gameHeightsPerView, gamesPerView;
   int     reducedBorder;
-  GLsizei xOffset, yOffset;
-  GLsizei drawWidth, drawHeight;
+  double  drawWidth, drawHeight;
 
   gameSize.width  = zx->screen.width  * 8;
   gameSize.height = zx->screen.height * 8;
 
-  // Convert up to window space, which is in pixel units
-  baseRect = [self bounds];
-  viewSize = baseRect.size;
+  // The drawable is in pixels, so retina screens are already accounted for
+  viewSize = self.drawableSize;
 
-  // Cope with retina screens
-  CGFloat screenScale = self.window.screen.backingScaleFactor ?: 1;
-  viewSize.width  *= screenScale;
-  viewSize.height *= screenScale;
-  
   // How many 1:1 game windows fit comfortably into the view?
   // Try to fit while reducing the border if the view is very small
   reducedBorder = borderSize;
@@ -538,62 +564,70 @@ failure:
     gamesPerView = floor(gamesPerView * snapSteps) / snapSteps;
   }
 
-  drawWidth  = gameSize.width  * gamesPerView;
-  drawHeight = gameSize.height * gamesPerView;
+  drawWidth  = floor(gameSize.width  * gamesPerView);
+  drawHeight = floor(gameSize.height * gamesPerView);
   scale = gamesPerView;
 
-  // Centre the game within the view (note that conversion to int floors the values)
-  xOffset = (viewSize.width  - drawWidth)  / 2;
-  yOffset = (viewSize.height - drawHeight) / 2;
-
-  // Set the affine transformation of x and y from normalized device coordinates to window coordinates
-  glViewport(0, 0, viewSize.width, viewSize.height);
-  // Set which matrix stack is the target for subsequent matrix operations
-  glMatrixMode(GL_PROJECTION);
-  // Replace the current matrix with the identity matrix
-  glLoadIdentity();
-  // Multiply the current matrix with an orthographic matrix
-  glOrtho(0, viewSize.width, 0, viewSize.height, 0.1, 1);
-  // Set the raster position for pixel operations
-  glRasterPos3f(xOffset, viewSize.height - yOffset, -0.3);
+  // Centre the game within the view
+  viewport.originX = floor((viewSize.width  - drawWidth)  / 2);
+  viewport.originY = floor((viewSize.height - drawHeight) / 2);
+  viewport.width   = drawWidth;
+  viewport.height  = drawHeight;
+  viewport.znear   = 0.0;
+  viewport.zfar    = 1.0;
 }
 
 - (void)drawRect:(NSRect)dirtyRect
 {
-  const zx_frame_t *frame;
-
-  // Note: NSOpenGLViews would appear to never receive a graphics context, so
-  // we must draw exclusively in terms of GL ops.
-
-  if (scale <= 0.0)
-    return;
-
-  if (doSetupDrawing)
-  {
-    [self setupDrawing];
-    doSetupDrawing = NO;
-  }
-
-  GLfloat zsx =  scale;
-  GLfloat zsy = -scale;
+  const zx_frame_t        *frame;
+  double                   r, g, b;
+  uint32_t                 mono;
+  MTLRenderPassDescriptor *pass;
+  id<CAMetalDrawable>      drawable;
+  id<MTLCommandBuffer>     commands;
+  id<MTLRenderCommandEncoder> encoder;
 
   (void) dirtyRect;
 
+  if (pipeline == nil || self.drawableSize.width <= 0 || self.drawableSize.height <= 0)
+    return;
+
+  [self setupDrawing];
+  if (scale <= 0.0)
+    return;
+
+  r = backgroundRed;
+  g = backgroundGreen;
+  b = backgroundBlue;
+  mono = monochromatic;
+  if (mono)
+    r = g = b = 0.299 * r + 0.587 * g + 0.114 * b;
+
+  // Clear the background every frame or you'll see junk in the border.
+  self.clearColor = MTLClearColorMake(r, g, b, 1.0);
+
+  pass     = self.currentRenderPassDescriptor;
+  drawable = self.currentDrawable;
+  if (pass == nil || drawable == nil)
+    return;
+
   frame = zxspectrum_claim_screen(zx);
-
-  // Clear the background
-  // Do this every frame or you'll see junk in the border.
-  glClearColor(backgroundRed, backgroundGreen, backgroundBlue, 1.0);
-  glClear(GL_COLOR_BUFFER_BIT);
-
-  // Draw the image
-  glPixelZoom(zsx, zsy);
-  glDrawPixels(GAMEWIDTH, GAMEHEIGHT, GL_RGBA, GL_UNSIGNED_BYTE, frame->pixels);
-
-  // Flush to screen
-  glFinish();
-
+  [texture replaceRegion:MTLRegionMake2D(0, 0, GAMEWIDTH, GAMEHEIGHT)
+             mipmapLevel:0
+               withBytes:frame->pixels
+             bytesPerRow:GAMEWIDTH * 4];
   zxspectrum_release_screen(zx);
+
+  commands = [queue commandBuffer];
+  encoder  = [commands renderCommandEncoderWithDescriptor:pass];
+  [encoder setRenderPipelineState:pipeline];
+  [encoder setViewport:viewport];
+  [encoder setFragmentTexture:texture atIndex:0];
+  [encoder setFragmentBytes:&mono length:sizeof(mono) atIndex:0];
+  [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+  [encoder endEncoding];
+  [commands presentDrawable:drawable];
+  [commands commit];
 }
 
 // -----------------------------------------------------------------------------
@@ -783,7 +817,7 @@ static int key_handler(uint16_t port, void *opaque)
 static void border_handler(int colour, void *opaque)
 {
   ZXGameView *view = (__bridge id) opaque;
-  GLclampf    r, g, b;
+  double      r, g, b;
 
   switch (colour)
   {

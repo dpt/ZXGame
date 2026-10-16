@@ -50,7 +50,7 @@ static int ngames;
 
   [self resizeAndCentreGameWindow];
 
-  gameView.delegate = self;
+  gameView.gameDelegate = self;
   [gameView start];
 
   [[NSNotificationCenter defaultCenter] addObserver:self

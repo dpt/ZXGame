@@ -6,7 +6,7 @@ All front-ends drive a game through `zxgame_ops_t` (`include/ZXGame/Game.h`).
 |-----------|--------|-------------|
 | `headless` | Built and tested | `zxgame_headless_main` |
 | `sdl3` | Built and run on macOS | `zxgame_sdl3_main` |
-| `macos` | Built and launched on macOS (Cocoa/OpenGL) | `zxgame_macos_main` |
+| `macos` | Built and launched on macOS (Cocoa/Metal) | `zxgame_macos_main` |
 | `windows` | Ported, **not compiled** | `zxgame_windows_main` |
 | `riscos` | Moved from The Great Escape, generalised, **not built** | `zxgame_riscos_main` |
 

@@ -150,7 +150,7 @@ if(ZXGAME_SDL3)
   endif()
 endif()
 
-# ---- macOS (Cocoa/OpenGL) ---------------------------------------------------
+# ---- macOS (Cocoa/Metal) ---------------------------------------------------
 #
 # An app provides its own main() calling zxgame_macos_main(), its xibs, plist
 # and icon. The xibs instantiate AppDelegate, ZXGameWindowController,
@@ -167,10 +167,9 @@ if(APPLE AND NOT TARGET ZXGameMacOS)
     hosts/macos/bitfifo.c)
   target_include_directories(ZXGameMacOS PUBLIC hosts/macos)
   target_compile_options(ZXGameMacOS PRIVATE -fobjc-arc)
-  target_compile_definitions(ZXGameMacOS PRIVATE GL_SILENCE_DEPRECATION)
   target_link_libraries(ZXGameMacOS PUBLIC ZXSpectrum
-    "-framework AudioUnit" "-framework Cocoa" "-framework CoreImage"
-    "-framework OpenGL" "-framework GLUT")
+    "-framework AudioUnit" "-framework Cocoa"
+    "-framework Metal" "-framework MetalKit")
   # The classes are only referenced from xibs, so keep them all.
   target_link_options(ZXGameMacOS INTERFACE -ObjC)
 endif()

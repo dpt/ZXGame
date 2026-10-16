@@ -7,17 +7,19 @@
 //
 
 #import <Cocoa/Cocoa.h>
+#import <MetalKit/MetalKit.h>
 
 @protocol ZXGameViewDelegate <NSObject>
 - (NSURL *) getStartupGame;
 @end
 
-@interface ZXGameView : NSOpenGLView <NSOpenSavePanelDelegate>
+@interface ZXGameView : MTKView <NSOpenSavePanelDelegate>
 {
   IBOutlet NSMenuItem *snapMenuItem;
 }
 
-@property (nonatomic, retain) id<ZXGameViewDelegate> delegate;
+// Not "delegate": MTKView already has one.
+@property (nonatomic, retain) id<ZXGameViewDelegate> gameDelegate;
 
 - (IBAction)saveDocumentAs:(id)sender;
 
