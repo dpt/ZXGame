@@ -122,6 +122,7 @@ typedef int fix16_t;
 #define zxgame_FLAG_WIDE_CTRANS (1u << 12) /* use wide ColourTrans table */
 #define zxgame_FLAG_FULL_SCREEN (1u << 13) /* full-screen mode active */
 #define zxgame_FLAG_GO_FULL_SCR (1u << 14) /* full-screen mode requested */
+#define zxgame_FLAG_RUNNING     (1u << 15) /* OPS->run is on the stack */
 
 /* ----------------------------------------------------------------------- */
 
@@ -488,6 +489,13 @@ static int sleep_handler(int durationTStates, void *opaque)
   assert(depth >= 0 && depth < MAXSTAMPS);
   if (depth < 0 || depth >= MAXSTAMPS)
     return should_quit(zxgame);
+
+  if (should_quit(zxgame))
+    return 1;
+
+  /* Pausing a game which is blocked in OPS->run means idling here. */
+  while ((zxgame->flags & zxgame_FLAG_PAUSED) && !should_quit(zxgame))
+    (void) do_sleep(zxgame, os_read_monotonic_time() + 5);
 
   if (should_quit(zxgame))
     return 1;
@@ -1020,7 +1028,7 @@ static int zxgame_event_null_reason_code(wimp_event_no event_no,
 
   zxgame = handle;
 
-  if (should_quit(zxgame))
+  if ((zxgame->flags & zxgame_FLAG_RUNNING) == 0 && should_quit(zxgame))
   {
     /* Note: Deregistering event handlers within an event handler is ok. */
     zxgame_destroy(zxgame);
@@ -1037,6 +1045,22 @@ static int zxgame_event_null_reason_code(wimp_event_no event_no,
   }
 
   emit_sound(zxgame);
+
+  /* A game with no 'step' blocks in 'run' on the Wimp thread, polling from
+   * its sleep callback. Start it once; nested null events do nothing. */
+  if (OPS->step == NULL)
+  {
+    if (zxgame->flags & zxgame_FLAG_RUNNING)
+      return event_PASS_ON;
+
+    zxgame->flags |= zxgame_FLAG_RUNNING;
+    OPS->run(zxgame->game, &zxgame->launch);
+    zxgame->flags &= ~zxgame_FLAG_RUNNING;
+
+    /* The game has ended, so close its window. */
+    zxgame_destroy(zxgame);
+    return event_HANDLED;
+  }
 
   /* Paused flag set => Game is paused by the user.
    * Sleeping flag set => Game is idling until next run. */
@@ -1725,14 +1749,6 @@ result_t zxgame_create(zxgame_t **new_zxgame, const char *startup_game)
 
   *new_zxgame = NULL;
 
-  /* This host has no game thread, so it can only drive a game via 'step'. */
-  if (OPS->step == NULL)
-  {
-    err = result_NOT_SUPPORTED;
-    result_report(err);
-    return err;
-  }
-
   zxgame = calloc(1, sizeof(*zxgame));
   if (zxgame == NULL)
     goto NoMem;
@@ -1795,7 +1811,8 @@ result_t zxgame_create(zxgame_t **new_zxgame, const char *startup_game)
   /* The first step runs the game's setup (and loads a startup game, if any). */
   zxgame->launch.model     = OPS->default_model;
   zxgame->launch.load_file = startup_game;
-  step_game(zxgame);
+  if (OPS->step != NULL)
+    step_game(zxgame);
 
   set_handlers(zxgame);
 
