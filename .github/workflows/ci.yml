@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    # No SDL3 on the runner, so this builds and tests the headless front-end.
+    - name: Configure
+      run: cmake -S . -B build -DZXGAME_SDL3=OFF
+
+    - name: Build
+      run: cmake --build build
+
+    - name: Test
+      run: ctest --test-dir build --output-on-failure
+
+  macos:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install SDL3
+      run: brew install sdl3
+
+    - name: Configure
+      run: cmake -S . -B build
+
+    # ZXGameMacOS and NullGameMacOS are EXCLUDE_FROM_ALL.
+    - name: Build
+      run: cmake --build build --target all ZXGameMacOS NullGameMacOS
+
+    - name: Test
+      run: ctest --test-dir build --output-on-failure
