@@ -13,7 +13,9 @@ ctest --test-dir build            # runs: NullGameHeadless -frames 1000
 build/NullGameHeadless -frames 1000
 ```
 
-The only test is that smoke test (`test/NullGame.c`, a minimal game). There is no lint target; `.clang-format` exists. `NullGameSDL3` builds only when SDL3 is found (`-DZXGAME_SDL3=OFF` skips it). Windows, RISC OS and macOS-Cocoa hosts are `EXCLUDE_FROM_ALL` and built only from a game's project.
+`cmake --build build --target NullGameMacOS` builds a Cocoa smoke test (`test/NullGameMac.m`, builds the window in code, `-seconds N` auto-quits) that opens a window; run it by hand.
+
+The only automated test is that smoke test (`test/NullGame.c`, a minimal game). There is no lint target; `.clang-format` exists. `NullGameSDL3` builds only when SDL3 is found (`-DZXGAME_SDL3=OFF` skips it). Windows, RISC OS and macOS-Cocoa hosts are `EXCLUDE_FROM_ALL` and built only from a game's project.
 
 ## Architecture
 

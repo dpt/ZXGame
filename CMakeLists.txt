@@ -217,4 +217,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     target_link_libraries(NullGameSDL3 ZXGameSDL3)
     zxgame_sdl3_app(NullGameSDL3)
   endif()
+
+  if(TARGET ZXGameMacOS)
+    # Cocoa smoke test: run it by hand, it opens a window.
+    add_executable(NullGameMacOS EXCLUDE_FROM_ALL test/NullGameMac.m)
+    target_compile_options(NullGameMacOS PRIVATE -fobjc-arc)
+    target_include_directories(NullGameMacOS PRIVATE hosts/macos)
+    target_link_libraries(NullGameMacOS ZXGameMacOS)
+  endif()
 endif()
