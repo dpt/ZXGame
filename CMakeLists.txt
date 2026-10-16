@@ -41,6 +41,12 @@ target_include_directories(ZXSpectrum
   PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+# Every object linked into a threaded wasm module needs atomics, so the
+# games' libraries must be compiled with -pthread too.
+if(EMSCRIPTEN)
+  target_compile_options(ZXSpectrum PUBLIC "-pthread")
+endif()
+
 # ---- Headless ---------------------------------------------------------------
 
 add_library(ZXGameHeadless STATIC hosts/headless/HeadlessHost.c)
@@ -56,7 +62,8 @@ if(ZXGAME_SDL3)
   endif()
 
   if(SDL3_FOUND)
-    set(ZXGAME_SDL3_DIR ${CMAKE_CURRENT_SOURCE_DIR}/hosts/sdl3)
+    # Cached so zxgame_sdl3_app() works when called from the parent project.
+    set(ZXGAME_SDL3_DIR ${CMAKE_CURRENT_SOURCE_DIR}/hosts/sdl3 CACHE INTERNAL "")
 
     add_library(ZXGameSDL3 STATIC
       hosts/sdl3/SDLHost.c
