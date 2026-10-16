@@ -6,6 +6,9 @@
 
 #include <AudioUnit/AudioUnit.h>
 
+#include "ZXSpectrum/Spectrum.h"
+#include "ZXSpectrum/slopay-chip.h"
+
 #include "bitfifo.h"
 
 #include "ZXAudio.h"
@@ -18,6 +21,14 @@
 
 #define MAXVOL          (32767 / 5)
 #define NORMSPEED       (100)   /* percent */
+
+#define AY_CLOCK_FREQ   (1773400) /* ZX Spectrum 128K AY-3-8912 clock rate */
+#define AY_VOLUME_PCT   (20)      /* 0..AY_MASTER_VOLUME_MAX */
+
+/* The beeper is a hard on/off level, so summing it straight into the AY signal
+ * biases the waveform upward whenever it is high. This headroom keeps the sum
+ * inside int16 range. (As in the SDL3 front-end.) */
+#define AY_GAIN_WITH_BEEPER (0.90f)
 
 /* Use output bus zero */
 #define kOutputBus      (0)
@@ -40,6 +51,8 @@ struct zxaudio
   int                     speed; /* percent */
   bitfifo_t              *fifo;
   int                     lastvol; /* most recently output volume */
+  slopay_chip_t          *ay;
+  slopay_chip_reg_t       ay_reg; /* register selected by the last port_AY_REGISTER write */
   AudioComponentInstance  instance;
 };
 
@@ -60,71 +73,50 @@ static OSStatus playback(void                       *inRefCon,
 
   pthread_mutex_lock(&audio->lock);
 
-  /* CHECK: Is this going to screw up with mNumberBuffers > 1 since i'm
-   *        fetching from the fifo? */
-
   fetch = BITS_SAMPLE * audio->speed / NORMSPEED;
   fetch = (fetch < 1) ? 1 : (fetch > 32) ? 32 : fetch;
 
   rc = noErr;
 
-  for (i = 0; i < ioData->mNumberBuffers && rc == noErr; i++)
+  for (i = 0; i < ioData->mNumberBuffers; i++)
   {
-    UInt32 outputCapacity;
-    UInt32 outputUsed;
+    signed short *p;
+    UInt32        j;
 
     assert(inNumberFrames == ioData->mBuffers[i].mDataByteSize / bytesPerSample);
 
-    outputCapacity = inNumberFrames;
-    outputUsed     = 0;
-
-    while (outputUsed < outputCapacity)
+    p = ioData->mBuffers[i].mData;
+    for (j = 0; j < inNumberFrames; j++)
     {
-      UInt32        outputCapacityRemaining;
-      size_t        bitsInFifo;
-      size_t        toCopy;
-      signed short *p;
-      UInt32        j;
+      size_t                 used;
+      unsigned int           bits;
+      slopay_chip_sample_t   ay;
+      int                    mix;
 
-      outputCapacityRemaining = outputCapacity - outputUsed;
-      bitsInFifo              = bitfifo_used(audio->fifo);
-      toCopy                  = bitsInFifo < outputCapacityRemaining ?
-                                bitsInFifo : outputCapacityRemaining;
-
-      if (bitsInFifo == 0)
+      /* Beeper: the mean of 'fetch' speaker bits. Silent when idle, so a
+       * beeper left high doesn't leave a DC offset under the AY. */
+      used = bitfifo_used(audio->fifo);
+      if (used >= (size_t) fetch)
       {
-        ioData->mBuffers[0].mDataByteSize = 0;
-        rc = -1;
-        break;
-      }
-
-      p = (signed short *) ioData->mBuffers[i].mData + outputUsed;
-      for (j = 0; j < toCopy; j++)
-      {
-        unsigned int bits;
-        result_t     err;
-        signed short vol;
-
         bits = 0;
-        err = bitfifo_dequeue(audio->fifo, &bits, fetch);
-        if (err == result_BITFIFO_INSUFFICIENT ||
-            err == result_BITFIFO_EMPTY)
-          /* When the fifo empties maintain the most recent volume */
-          vol = audio->lastvol;
-        else
-          vol = (int) __builtin_popcount(bits) * MAXVOL / fetch;
-        *p++ = vol;
-
-        audio->lastvol = vol;
+        bitfifo_dequeue(audio->fifo, &bits, fetch);
+        audio->lastvol = (int) __builtin_popcount(bits) * MAXVOL / fetch;
       }
+      else if (used == 0)
+      {
+        audio->lastvol = 0;
+      }
+      /* else a partial fifo: maintain the most recent volume */
 
-      outputUsed += toCopy;
-    }
-
-    if (rc == noErr)
-    {
-      ioData->mBuffers[i].mDataByteSize = outputUsed * bytesPerSample;
-      assert(outputUsed == outputCapacity);
+      /* AY: mono, so the left half is the whole signal */
+      ay  = slopay_chip_get_sample(audio->ay);
+      mix = (int) ((signed short) (ay & 0xFFFF) * AY_GAIN_WITH_BEEPER) +
+            audio->lastvol;
+      if (mix > 32767)
+        mix = 32767;
+      else if (mix < -32768)
+        mix = -32768;
+      *p++ = (signed short) mix;
     }
   }
 
@@ -162,6 +154,12 @@ zxaudio_t *zxaudio_create(void)
   pthread_mutex_init(&audio->lock, NULL);
   audio->enabled = 1;
   audio->speed   = NORMSPEED;
+
+  audio->ay = slopay_chip_create(AY_CLOCK_FREQ, SAMPLE_RATE);
+  if (audio->ay == NULL)
+    goto failure; /* OOM */
+  slopay_chip_set_stereo_mode(audio->ay, SLOPAY_CHIP_STEREO_MODE_MONO);
+  slopay_chip_set_volume(audio->ay, AY_VOLUME_PCT);
 
   /* Create a bit fifo */
   audio->fifo = bitfifo_create(BITFIFO_LENGTH);
@@ -252,6 +250,8 @@ void zxaudio_destroy(zxaudio_t *audio)
   }
 
   bitfifo_destroy(audio->fifo);
+  if (audio->ay)
+    slopay_chip_destroy(audio->ay);
   pthread_mutex_destroy(&audio->lock);
   free(audio);
 }
@@ -291,5 +291,18 @@ void zxaudio_speaker(zxaudio_t *audio, int on)
   pthread_mutex_lock(&audio->lock);
   /* There's nothing we can do if the buffer is full, so ignore errors */
   (void) bitfifo_enqueue(audio->fifo, &bit, 0, 1);
+  pthread_mutex_unlock(&audio->lock);
+}
+
+void zxaudio_ay(zxaudio_t *audio, uint16_t port, uint8_t byte)
+{
+  if (audio == NULL)
+    return;
+
+  pthread_mutex_lock(&audio->lock);
+  if (port == port_AY_REGISTER)
+    audio->ay_reg = byte;
+  else
+    slopay_chip_write_register(audio->ay, audio->ay_reg, byte);
   pthread_mutex_unlock(&audio->lock);
 }

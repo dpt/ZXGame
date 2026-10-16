@@ -189,7 +189,7 @@ static NSString *const shaderSource =
     &key_handler,
     &border_handler,
     &speaker_handler,
-    NULL, // ay_out
+    &ay_handler,
     ZX_PIXEL_ABGR8888 // MTLPixelFormatRGBA8Unorm on little endian
   };
 
@@ -837,6 +837,15 @@ static void border_handler(int colour, void *opaque)
     view->backgroundGreen = g;
     view->backgroundBlue  = b;
   });
+}
+
+static void ay_handler(uint16_t port, uint8_t byte, zxclock_t tstates, void *opaque)
+{
+  ZXGameView *view = (__bridge id) opaque;
+
+  (void) tstates;
+
+  zxaudio_ay(view->audio, port, byte);
 }
 
 static void speaker_handler(int on_off, zxclock_t tstates, void *opaque)

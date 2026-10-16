@@ -2,13 +2,14 @@
  *
  * Builds the window in code instead of from xibs, so it bypasses
  * AppDelegate and ZXGameWindowController and exercises ZXGameView only.
- * Paints a test pattern and cycles the border colour.
+ * Paints a test pattern, cycles the border colour and plays an AY tone.
  *
  * Usage: NullGameMacOS [-seconds N]
  */
 #import <Cocoa/Cocoa.h>
 
 #import "ZXGame/Game.h"
+#import "ZXSpectrum/slopay-chip.h"
 #import "ZXGameView.h"
 
 int zxgame_macos_main(int argc, char *argv[], const zxgame_ops_t *ops);
@@ -28,6 +29,16 @@ static void null_run(void *game, const zxgame_launch_t *launch)
     zx->screen.pixels[i] = (i / SCREEN_BITMAP_ROWBYTES) & 1 ? 0x55 : 0xAA;
   for (i = 0; i < SCREEN_ATTRIBUTES_LENGTH; i++)
     zx->screen.attributes[i] = (i % 7) + 1;
+
+  /* Channel A: tone at about 440Hz, full volume */
+  zx->out(zx, port_AY_REGISTER, AY_REG_CHANNEL_A_FINE_PITCH);
+  zx->out(zx, port_AY_DATA,     0xFC);
+  zx->out(zx, port_AY_REGISTER, AY_REG_CHANNEL_A_COARSE_PITCH);
+  zx->out(zx, port_AY_DATA,     0x00);
+  zx->out(zx, port_AY_REGISTER, AY_REG_MIXER);
+  zx->out(zx, port_AY_DATA,     AY_MIXER_ALL_OFF & ~AY_MIXER_NO_TONE_A);
+  zx->out(zx, port_AY_REGISTER, AY_REG_CHANNEL_A_VOLUME);
+  zx->out(zx, port_AY_DATA,     0x0F);
 
   for (frame = 0; !zxspectrum_quit_requested(zx); frame++)
   {

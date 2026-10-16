@@ -3,6 +3,8 @@
 #ifndef ZXAUDIO_H
 #define ZXAUDIO_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -23,6 +25,10 @@ void zxaudio_set_speed(zxaudio_t *audio, int percent);
 
 /** Queue one speaker bit. Called from the game thread. */
 void zxaudio_speaker(zxaudio_t *audio, int on);
+
+/** AY-3-8912 register select (port_AY_REGISTER) or data write (port_AY_DATA).
+ *  Applied on arrival, not at its T-state timestamp. */
+void zxaudio_ay(zxaudio_t *audio, uint16_t port, uint8_t byte);
 
 #ifdef __cplusplus
 }
