@@ -165,6 +165,21 @@ if(WIN32 AND NOT TARGET ZXGameWindows)
   target_link_libraries(ZXGameWindows PUBLIC ZXSpectrum)
 endif()
 
+# ---- RISC OS (Wimp, GCCSDK) -------------------------------------------------
+#
+# An app provides main(), calling zxgame_riscos_main(), plus its Resources and
+# !Run files. The app's build must give this target the AppEngine and DPTLib
+# include paths and link libraries, and the directory holding the generated
+# iconnames.h. See hosts/README.md.
+
+if(TARGET_RISCOS AND NOT TARGET ZXGameRISCOS)
+  file(GLOB ZXGAME_RISCOS_SOURCES CONFIGURE_DEPENDS hosts/riscos/*.c)
+  add_library(ZXGameRISCOS STATIC EXCLUDE_FROM_ALL ${ZXGAME_RISCOS_SOURCES})
+  target_include_directories(ZXGameRISCOS PRIVATE hosts/riscos)
+  target_link_libraries(ZXGameRISCOS PUBLIC ZXSpectrum)
+  set_target_properties(ZXGameRISCOS PROPERTIES C_STANDARD 99)
+endif()
+
 endif() # NOT TARGET ZXSpectrum
 
 # ---- Smoke test -------------------------------------------------------------

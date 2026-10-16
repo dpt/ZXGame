@@ -151,6 +151,27 @@ int zxgame_macos_main(int argc, char *argv[], const zxgame_ops_t *ops);
  * and nCmdShow. 'icon_resource' is an icon resource id in the app, or 0. */
 int zxgame_windows_main(void *hinstance, int ncmdshow, const zxgame_ops_t *ops, int icon_resource);
 
+/* RISC OS only: the Wimp front-end. The app bundle (Resources, !Run etc.)
+ * and its build supply the templates and messages; see hosts/README.md. */
+typedef struct zxgame_riscos_app
+{
+  /** Short name used for the <appname>Res: path and <appname>$ScreenMode
+   *  variable, e.g. "GtEscape". */
+  const char *appname;
+
+  /** File type of saved games. */
+  unsigned int filetype;
+
+  /** Sprite shown in Filer windows' info (7 characters max). */
+  const char *window_sprite;
+
+  /** Default saved game leaf name. */
+  const char *save_name;
+}
+zxgame_riscos_app_t;
+
+int zxgame_riscos_main(int argc, char *argv[], const zxgame_ops_t *ops, const zxgame_riscos_app_t *app);
+
 #ifdef __cplusplus
 }
 #endif
