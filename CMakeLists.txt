@@ -58,7 +58,13 @@ if(ZXGAME_SDL3)
   if(EMSCRIPTEN)
     set(SDL3_FOUND TRUE)
   else()
-    find_package(SDL3 QUIET)
+    # GLOBAL (CMake 3.24+) keeps SDL3::SDL3 visible to the parent project,
+    # which zxgame_sdl3_app() refers to from there.
+    if(CMAKE_VERSION VERSION_LESS 3.24)
+      find_package(SDL3 QUIET)
+    else()
+      find_package(SDL3 QUIET GLOBAL)
+    endif()
   endif()
 
   if(SDL3_FOUND)
@@ -173,6 +179,8 @@ endif()
 # An app provides WinMain, calling zxgame_windows_main(), plus its resources.
 
 if(WIN32 AND NOT TARGET ZXGameWindows)
+  # The host is C++ and a game's project() may list only C.
+  enable_language(CXX)
   add_library(ZXGameWindows STATIC EXCLUDE_FROM_ALL hosts/windows/WinHost.cpp)
   target_link_libraries(ZXGameWindows PUBLIC ZXSpectrum)
 endif()
