@@ -974,7 +974,8 @@ static void action(action_t action)
       break;
 
     case OpenSaveScreenshot:
-      zxgamesave_show_screenshot();
+      if (OPS->save && OPS->load)
+        zxgamesave_show_screenshot();
       break;
 
     case ZoomOut:
@@ -1905,9 +1906,15 @@ result_t zxgame_save_screenshot(zxgame_t *zxgame, const char *file_name)
 
 /* ----------------------------------------------------------------------- */
 
+static int have_saves(void)
+{
+  return OPS->save != NULL && OPS->load != NULL;
+}
+
 result_t zxgame_init(void)
 {
   result_t err;
+  wimp_w   save_w;
 
   /* Dependencies */
 
@@ -1923,18 +1930,23 @@ result_t zxgame_init(void)
 
   /* Internal dependencies */
 
-  err = zxgamesave_dlg_init();
-  if (!err)
-    err = zxgamescale_dlg_init();
+  err = zxgamescale_dlg_init();
+  if (!err && have_saves())
+    err = zxgamesave_dlg_init();
   if (err)
     return err;
 
   /* Menu */
 
+  /* The menu comes from the app's Messages file, so a game without saves
+   * simply leaves the save entries out of "menu.zxgame". The submenu
+   * arguments for entries which aren't there are ignored. */
+  save_w = have_saves() ? dialogue_get_window(zxgamesave_dlg) : (wimp_w) 0;
+
   GLOBALS.zxgame_m = menu_create_from_desc(message0("menu.zxgame"),
                                            dialogue_get_window(zxgamescale_dlg),
-                                           dialogue_get_window(zxgamesave_dlg),
-                                           dialogue_get_window(zxgamesave_dlg));
+                                           save_w,
+                                           save_w);
 
   err = help_add_menu(GLOBALS.zxgame_m, "zxgame");
   if (err)
@@ -1950,7 +1962,8 @@ void zxgame_fin(void)
   menu_destroy(GLOBALS.zxgame_m);
 
   zxgamescale_dlg_fin();
-  zxgamesave_dlg_fin();
+  if (have_saves())
+    zxgamesave_dlg_fin();
 
   register_single_handlers(0);
 
