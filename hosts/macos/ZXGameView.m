@@ -13,8 +13,6 @@
 
 #import <Foundation/Foundation.h>
 
-#import <AudioUnit/AudioUnit.h>
-
 #import <Cocoa/Cocoa.h>
 
 #import <CoreImage/CoreImage.h>
@@ -34,7 +32,7 @@
 
 #import "ZXGameWindowController.h"
 
-#import "bitfifo.h"
+#import "ZXAudio.h"
 
 #import "ZXGameView.h"
 
@@ -52,16 +50,6 @@
 #define MAXSPEED        (99999) // fastest possible game (percent)
 
 // -----------------------------------------------------------------------------
-
-// Audio
-//
-#define SAMPLE_RATE     (44100)
-#define PERIOD          (10)    // fraction of a second (10 => 0.1s)
-#define BUFFER_SAMPLES  (SAMPLE_RATE / PERIOD)
-#define BITS_SAMPLE     (5)     // magic value: we take the mean of this many input bits to make an output sample
-#define BITFIFO_LENGTH  (BUFFER_SAMPLES * BITS_SAMPLE) // in bits
-
-#define MAXVOL          (32767 / 5)
 
 // -----------------------------------------------------------------------------
 
@@ -100,15 +88,7 @@
 
   GLclampf        backgroundRed, backgroundGreen, backgroundBlue;
 
-  struct
-  {
-    BOOL          enabled;
-    int           index;    // index into samples
-    bitfifo_t    *fifo;
-    int           lastvol;  // most recently output volume
-    AudioComponentInstance instance;
-  }
-  audio;
+  zxaudio_t      *audio;
 
   // -- End of variables accessed from game thread must be @synchronized
 }
@@ -197,7 +177,7 @@
   if (game == NULL)
     goto failure;
 
-  [self setupAudio];
+  audio = zxaudio_create();
 
   return;
 
@@ -252,7 +232,8 @@ failure:
     ops->destroy(game);
   zxspectrum_destroy(zx);
 
-  [self teardownAudio];
+  zxaudio_destroy(audio);
+  audio = NULL;
 }
 
 // -----------------------------------------------------------------------------
@@ -491,6 +472,8 @@ failure:
       speed = SPEEDQ;
     else if (speed > MAXSPEED)
       speed = MAXSPEED;
+
+    zxaudio_set_speed(audio, speed);
   }
 }
 
@@ -509,7 +492,7 @@ failure:
 
 - (IBAction)toggleSound:(id)sender
 {
-  [self toggleAudio];
+  zxaudio_toggle(audio);
 }
 
 // -----------------------------------------------------------------------------
@@ -825,15 +808,10 @@ static void border_handler(int colour, void *opaque)
 static void speaker_handler(int on_off, zxclock_t tstates, void *opaque)
 {
   ZXGameView  *view = (__bridge id) opaque;
-  unsigned int bit = on_off;
 
   (void) tstates;
 
-  @synchronized(view)
-  {
-    // There's nothing we can do if the buffer is full, so ignore errors
-    (void) bitfifo_enqueue(view->audio.fifo, &bit, 0, 1);
-  }
+  zxaudio_speaker(view->audio, on_off);
 }
 
 // -----------------------------------------------------------------------------
@@ -886,246 +864,6 @@ static void speaker_handler(int on_off, zxclock_t tstates, void *opaque)
 }
 
 // -----------------------------------------------------------------------------
-
-#pragma mark - Sound
-
-// Use output bus zero
-#define kOutputBus      (0)
-
-// To make things easy we assume that the emulated ZX Spectrum is pumping out
-// 220,500 samples per second into the fifo. We then sample this down by
-// averaging five value to produce a 44.1KHz signal. This certainly sounds
-// right but I'm not currently sure how accurate it really is.
-// To produce a 22.05KHz signal instead: average ten values, and so on.
-
-// Z80 @ 3.5MHz
-// Each OUT takes 11 cycles
-// >>> 3.5e6 / 11
-// 318181.81 recurring OUTs/s theoretical max
-
-// This is the same as an AURenderCallback except it's not a pointer type.
-static OSStatus playbackCallback(void                       *inRefCon,
-                                 AudioUnitRenderActionFlags *ioActionFlags,
-                                 const AudioTimeStamp       *inTimeStamp,
-                                 UInt32                      inBusNumber,
-                                 UInt32                      inNumberFrames,
-                                 AudioBufferList            *ioData);
-
-- (void)setupAudio
-{
-  AudioComponentDescription   desc;
-  AudioComponent              component;
-  AudioComponentInstance      instance;
-  OSStatus                    status;
-  UInt32                      flag;
-  AudioStreamBasicDescription audioFormat;
-  AURenderCallbackStruct      input;
-
-  // Describe audio component
-  desc.componentType          = kAudioUnitType_Output;
-  desc.componentSubType       = kAudioUnitSubType_DefaultOutput;
-  desc.componentManufacturer  = kAudioUnitManufacturer_Apple;
-  desc.componentFlags         = 0;
-  desc.componentFlagsMask     = 0;
-
-  // Find a matching audio component
-  component = AudioComponentFindNext(NULL, &desc);
-  if (component == NULL)
-    return; // no matching audio component was found
-
-  // Create a new instance of the audio component
-  status = AudioComponentInstanceNew(component, &instance);
-  if (status)
-    goto failure;
-
-  // Enable IO for playback
-  flag = 1;
-  status = AudioUnitSetProperty(instance,
-                                kAudioOutputUnitProperty_EnableIO,
-                                kAudioUnitScope_Output,
-                                kOutputBus,
-                                &flag,
-                                sizeof(flag));
-  if (status && status != kAudioUnitErr_InvalidProperty)
-    goto failure;
-
-  // Describe the format
-  audioFormat.mSampleRate       = SAMPLE_RATE;
-  audioFormat.mFormatID         = kAudioFormatLinearPCM;
-  audioFormat.mFormatFlags      = kLinearPCMFormatFlagIsSignedInteger |
-                                  kLinearPCMFormatFlagIsPacked;
-  audioFormat.mBytesPerPacket   = 2;
-  audioFormat.mFramesPerPacket  = 1;
-  audioFormat.mBytesPerFrame    = 2;
-  audioFormat.mChannelsPerFrame = 1;
-  audioFormat.mBitsPerChannel   = 16;
-  audioFormat.mReserved         = 0;
-
-  // Apply the format
-  status = AudioUnitSetProperty(instance,
-                                kAudioUnitProperty_StreamFormat,
-                                kAudioUnitScope_Input,
-                                kOutputBus,
-                                &audioFormat,
-                                sizeof(audioFormat));
-  if (status)
-    goto failure;
-
-  // Set the output callback
-  input.inputProc       = playbackCallback;
-  input.inputProcRefCon = (__bridge void *)(self);
-  status = AudioUnitSetProperty(instance,
-                                kAudioUnitProperty_SetRenderCallback,
-                                kAudioUnitScope_Input,
-                                kOutputBus,
-                                &input,
-                                sizeof(input));
-  if (status)
-    goto failure;
-
-  // Initialise
-  status = AudioUnitInitialize(instance);
-  if (status)
-    goto failure;
-
-  // Setup audio
-  audio.enabled  = YES;
-  audio.index    = 0;
-  audio.fifo     = NULL;
-  audio.lastvol  = 0;
-  audio.instance = instance;
-
-  // Create a bit fifo
-  audio.fifo = bitfifo_create(BITFIFO_LENGTH);
-  if (audio.fifo == NULL)
-    goto failure; // OOM
-
-  // Start playing
-  status = AudioOutputUnitStart(instance);
-  if (status)
-    goto failure;
-
-  return;
-
-
-failure:
-  //  cout << "failure" << status << endl;
-
-  return;
-}
-
-- (void)toggleAudio
-{
-  OSStatus status;
-
-  audio.enabled = !audio.enabled;
-
-  audio.index = 0; // flush the buffer
-
-  if (audio.enabled)
-    status = AudioOutputUnitStart(audio.instance);
-  else
-    status = AudioOutputUnitStop(audio.instance);
-
-  // if (status)
-  //   there was a problem;
-}
-
-- (void)teardownAudio
-{
-  AudioOutputUnitStop(audio.instance);
-  AudioUnitUninitialize(audio.instance);
-  AudioComponentInstanceDispose(audio.instance);
-}
-
-static
-OSStatus playbackCallback(void                       *inRefCon,
-                          AudioUnitRenderActionFlags *ioActionFlags,
-                          const AudioTimeStamp       *inTimeStamp,
-                          UInt32                      inBusNumber,
-                          UInt32                      inNumberFrames,
-                          AudioBufferList            *ioData)
-{
-  const int   bytesPerSample = 2;
-
-  ZXGameView *view = (__bridge id) inRefCon;
-  result_t    err;
-  int         fetch;
-  OSStatus    rc;
-  UInt32      i;
-
-  @synchronized(view)
-  {
-    // CHECK: Is this going to screw up with mNumberBuffers > 1 since i'm
-    //        fetching from the fifo?
-
-    fetch = BITS_SAMPLE * view->speed / NORMSPEED;
-    fetch = (fetch < 1) ? 1 : (fetch > 32) ? 32 : fetch;
-
-    for (i = 0; i < ioData->mNumberBuffers; i++)
-    {
-      assert(inNumberFrames == ioData->mBuffers[i].mDataByteSize / bytesPerSample);
-
-      UInt32 outputCapacity;
-      UInt32 outputUsed;
-
-      outputCapacity = inNumberFrames;
-      outputUsed     = 0;
-
-      while (outputUsed < outputCapacity)
-      {
-        UInt32 outputCapacityRemaining;
-        size_t bitsInFifo;
-        size_t toCopy;
-
-        outputCapacityRemaining = outputCapacity - outputUsed;
-        bitsInFifo              = bitfifo_used(view->audio.fifo);
-        toCopy                  = MIN(bitsInFifo, outputCapacityRemaining);
-
-        if (bitsInFifo == 0)
-          goto no_data;
-
-        signed short      *p;
-        signed short       vol;
-        UInt32             j;
-
-        p = (signed short *) ioData->mBuffers[i].mData + outputUsed;
-        for (j = 0; j < toCopy; j++)
-        {
-          unsigned int bits;
-
-          bits = 0;
-          err = bitfifo_dequeue(view->audio.fifo, &bits, fetch);
-          if (err == result_BITFIFO_INSUFFICIENT ||
-              err == result_BITFIFO_EMPTY)
-            // When the fifo empties maintain the most recent volume
-            vol = view->audio.lastvol;
-          else
-            vol = (int) __builtin_popcount(bits) * MAXVOL / fetch;
-          *p++ = vol;
-
-          view->audio.lastvol = vol;
-        }
-
-        outputUsed += toCopy;
-      }
-      ioData->mBuffers[i].mDataByteSize = outputUsed * bytesPerSample;
-
-      assert(outputUsed == outputCapacity);
-    }
-
-    rc = noErr;
-    goto exit;
-
-
-  no_data:
-    ioData->mBuffers[0].mDataByteSize = 0;
-    rc = -1;
-
-  exit:
-    return rc;
-  }
-}
 
 @end
 

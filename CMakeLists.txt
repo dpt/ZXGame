@@ -163,6 +163,7 @@ if(APPLE AND NOT TARGET ZXGameMacOS)
     hosts/macos/ZXGameView.m
     hosts/macos/ZXGameWindow.m
     hosts/macos/ZXGameWindowController.m
+    hosts/macos/ZXAudio.c
     hosts/macos/bitfifo.c)
   target_include_directories(ZXGameMacOS PUBLIC hosts/macos)
   target_compile_options(ZXGameMacOS PRIVATE -fobjc-arc)
