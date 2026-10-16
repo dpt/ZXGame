@@ -16,6 +16,7 @@
 }
 
 - (void)setStartupGame:(NSURL *)url;
+- (void)stopGame;
 
 @end
 

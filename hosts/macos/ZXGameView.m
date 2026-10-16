@@ -233,9 +233,16 @@ failure:
   // Signal to the game thread to quit
   @synchronized(self)
   {
+    if (quit)
+      return; // already stopped
     quit = YES;
     paused = NO;
   }
+
+  // Games which don't act on the quit result from sleep() need this to leave
+  // their run loop, else the join below never returns.
+  if (ops->stop)
+    ops->stop(game);
 
   // Wait for it to yield
   // Is this is a bad idea to wait like this on the UI thread?

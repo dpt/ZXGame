@@ -77,6 +77,11 @@ static int ngames;
   [gameView stop];
 }
 
+- (void)stopGame
+{
+  [gameView stop];
+}
+
 // -----------------------------------------------------------------------------
 
 #pragma mark - IBAction handlers

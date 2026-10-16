@@ -32,6 +32,13 @@
   [self newGame:self];
 }
 
+- (void)applicationWillTerminate:(NSNotification *)notification
+{
+  // Cmd-Q doesn't close windows, so stop the game threads here
+  for (ZXGameWindowController *game in windowControllers)
+    [game stopGame];
+}
+
 // MARK: - IBAction handlers
 
 - (IBAction)newGame:(id)sender
