@@ -509,6 +509,7 @@ void zxspectrum_release_screen(zxspectrum_t *state)
 {
   zxspectrum_private_t *prv = (zxspectrum_private_t *) state;
 
+  (void) prv; /* unused where mutex_unlock expands to nothing */
   mutex_unlock(prv->lock);
 }
 

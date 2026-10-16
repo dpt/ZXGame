@@ -11,7 +11,9 @@
 #include <stdint.h>
 
 /* Number of elements in an array */
+#ifndef NELEMS
 #define NELEMS(a) (sizeof(a) / sizeof((a)[0]))
+#endif
 
 /* Shorthand types */
 typedef int16_t s16;

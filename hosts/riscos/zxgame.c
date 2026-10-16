@@ -1501,7 +1501,8 @@ void zxgame_update(zxgame_t *zxgame, zxgame_update_flags flags)
         snap2px(&extent_w, &extent_h);
 
         minsize = window_set_extent2(zxgame->w, 0, -extent_h, extent_w, 0);
-        // TODO: If we hit minsize then read the size we minned out at.
+        (void) minsize;
+        /* TODO: If we hit minsize then read the size we minned out at. */
 
         /* Save the extent. */
         zxgame->extent.x0 = 0;
@@ -1553,7 +1554,8 @@ void zxgame_update(zxgame_t *zxgame, zxgame_update_flags flags)
         read_max_visible_area(zxgame->w, &extent_w, &extent_h);
 
         minsize = window_set_extent2(zxgame->w, 0, -extent_h, extent_w, 0);
-        // TODO: If we hit minsize then read the size we minned out at.
+        (void) minsize;
+        /* TODO: If we hit minsize then read the size we minned out at. */
 
         /* Save the extent. */
         zxgame->extent.x0 = 0;
