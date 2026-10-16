@@ -112,16 +112,21 @@ if(ZXGAME_SDL3)
       endif()
     endif()
 
-    # zxgame_sdl3_app(<target>): per-executable platform fix-ups.
+    # zxgame_sdl3_app(<target> [<shell.html>]): per-executable platform fix-ups.
+    # The optional shell replaces the default web page for Emscripten builds.
     function(zxgame_sdl3_app target)
+      set(shell "${ZXGAME_SDL3_DIR}/shell.html")
+      if(ARGC GREATER 1)
+        set(shell "${ARGV1}")
+      endif()
       if(EMSCRIPTEN)
         set_target_properties(${target} PROPERTIES SUFFIX ".html")
         target_link_options(${target} PRIVATE
           "-sUSE_SDL=3" "-pthread" "-sPTHREAD_POOL_SIZE=4"
           "-sINITIAL_MEMORY=67108864" "-sEXIT_RUNTIME=0"
-          "--shell-file=${ZXGAME_SDL3_DIR}/shell.html")
+          "--shell-file=${shell}")
         set_target_properties(${target} PROPERTIES LINK_DEPENDS
-          "${ZXGAME_SDL3_DIR}/shell.html")
+          "${shell}")
         add_custom_command(TARGET ${target} POST_BUILD
           COMMAND ${CMAKE_COMMAND} -E copy
             "${ZXGAME_SDL3_DIR}/coi-serviceworker.js"
