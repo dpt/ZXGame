@@ -1,0 +1,59 @@
+---
+BasedOnStyle: LLVM
+Language: C
+
+# Indentation
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+ColumnLimit: 80
+
+# Broken braces: every brace (function, control-flow, struct, etc.) on its own line
+BreakBeforeBraces: Allman
+
+# extern "C" { ... } body stays at column 0, not indented
+IndentExternBlock: NoIndent
+
+# switch case labels align with the switch, not indented
+IndentCaseLabels: false
+
+# Pointer/reference declarator sticks to the name: int *p, void *opaque
+PointerAlignment: Right
+
+# Align runs of consecutive declarations, assignments, and #define values
+# (preserves the column-table style used throughout the codebase)
+AlignConsecutiveAssignments:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: false
+  AlignCompound: true
+  PadOperators: true
+AlignConsecutiveDeclarations:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: false
+AlignConsecutiveMacros:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: false
+
+# Align wrapped parameters under the opening parenthesis
+AlignAfterOpenBracket: Align
+BinPackParameters: false
+BinPackArguments: false
+
+# Never split "return_type\nname(" onto two lines -- always wrap at the
+# parameter list instead, keeping return type and name together
+PenaltyReturnTypeOnItsOwnLine: 1000
+
+# Don't reorder the hand-grouped #include blocks
+SortIncludes: Never
+
+# Don't reflow carefully wrapped block comments and Z80 address annotations
+ReflowComments: false
+
+# No collapsed single-line bodies
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
