@@ -61,6 +61,13 @@
 #include "zxscale.h"
 #include "zxsave.h"
 
+/* The menu indices are fixed, so a game without saves has its Save entry
+ * shaded rather than removed from the menu. */
+static int have_saves(void)
+{
+  return OPS->save != NULL && OPS->load != NULL;
+}
+
 /* ----------------------------------------------------------------------- */
 
 /* Configuration */
@@ -974,7 +981,7 @@ static void action(action_t action)
       break;
 
     case OpenSaveScreenshot:
-      if (OPS->save && OPS->load)
+      if (have_saves())
         zxgamesave_show_screenshot();
       break;
 
@@ -1163,6 +1170,7 @@ static void zxgame_menu_update(void)
   tick(m, SCALED_SNAP,     (zxgame->flags & zxgame_FLAG_SNAP) != 0);
 
   /* "Save" menu */
+  shade(GLOBALS.zxgame_m, ZXGAME_SAVE, !have_saves());
   m = GLOBALS.zxgame_m->entries[ZXGAME_SAVE].sub_menu;
   shade(m, SAVE_GAME, zxgame_can_save(zxgame) == 0);
 
@@ -1906,15 +1914,9 @@ result_t zxgame_save_screenshot(zxgame_t *zxgame, const char *file_name)
 
 /* ----------------------------------------------------------------------- */
 
-static int have_saves(void)
-{
-  return OPS->save != NULL && OPS->load != NULL;
-}
-
 result_t zxgame_init(void)
 {
   result_t err;
-  wimp_w   save_w;
 
   /* Dependencies */
 
@@ -1930,23 +1932,18 @@ result_t zxgame_init(void)
 
   /* Internal dependencies */
 
-  err = zxgamescale_dlg_init();
-  if (!err && have_saves())
-    err = zxgamesave_dlg_init();
+  err = zxgamesave_dlg_init();
+  if (!err)
+    err = zxgamescale_dlg_init();
   if (err)
     return err;
 
   /* Menu */
 
-  /* The menu comes from the app's Messages file, so a game without saves
-   * simply leaves the save entries out of "menu.zxgame". The submenu
-   * arguments for entries which aren't there are ignored. */
-  save_w = have_saves() ? dialogue_get_window(zxgamesave_dlg) : (wimp_w) 0;
-
   GLOBALS.zxgame_m = menu_create_from_desc(message0("menu.zxgame"),
                                            dialogue_get_window(zxgamescale_dlg),
-                                           save_w,
-                                           save_w);
+                                           dialogue_get_window(zxgamesave_dlg),
+                                           dialogue_get_window(zxgamesave_dlg));
 
   err = help_add_menu(GLOBALS.zxgame_m, "zxgame");
   if (err)
@@ -1962,8 +1959,7 @@ void zxgame_fin(void)
   menu_destroy(GLOBALS.zxgame_m);
 
   zxgamescale_dlg_fin();
-  if (have_saves())
-    zxgamesave_dlg_fin();
+  zxgamesave_dlg_fin();
 
   register_single_handlers(0);
 

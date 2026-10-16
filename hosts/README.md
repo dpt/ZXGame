@@ -35,7 +35,7 @@ The GCCSDK/AppEngine/OSLib Wimp application. An app supplies:
   and gives `ZXGameRISCOS` the AppEngine, DPTLib and OSLib include paths and
   libraries. See The Great Escape's `platform/riscos/!GtEscape/CMakeLists.txt`.
 
-Save and screenshot UI is only set up if the game supplies `save` and `load`
-(and `in_menu`, to stop saving at start-up menus). The menu is read from the
-app's `Messages` file (`menu.zxgame`), so a game without saves omits the save
-entries there; the `Save` dialogue template is then not needed either.
+The menu layout is fixed (View, Save, Sound, Speed), so the app's `Messages`
+must always define the Save entries and its Templates the Save dialogue. A game
+that doesn't supply `save` and `load` gets the Save entry shaded and the
+screenshot key ignored. `in_menu` stops saving at start-up menus.
