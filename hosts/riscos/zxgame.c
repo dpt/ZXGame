@@ -1725,6 +1725,14 @@ result_t zxgame_create(zxgame_t **new_zxgame, const char *startup_game)
 
   *new_zxgame = NULL;
 
+  /* This host has no game thread, so it can only drive a game via 'step'. */
+  if (OPS->step == NULL)
+  {
+    err = result_NOT_SUPPORTED;
+    result_report(err);
+    return err;
+  }
+
   zxgame = calloc(1, sizeof(*zxgame));
   if (zxgame == NULL)
     goto NoMem;
