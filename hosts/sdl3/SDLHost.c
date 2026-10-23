@@ -246,9 +246,6 @@ typedef struct zxh_sdl_state
 
   int               speed;      // game speed, percent, SPEED_MIN..SPEED_MAX
 
-  Uint64            stamps[MAX_STAMPS]; // SDL_GetTicksNS() values
-  int               nstamps;
-
   /* Absolute monotonic-clock deadline for the next sleep, advanced by each
    * call's nominal duration rather than re-anchored from "now" -- see
    * zxh_sleep_handler for why. */
@@ -415,25 +412,14 @@ static void zxh_draw_handler(const zxbox_t *dirty,
 
 static void zxh_stamp_handler(void *opaque)
 {
-  zxh_sdl_state_t *state = opaque;
-
-  // Stack timestamps as they arrive
-  assert(state->nstamps < MAX_STAMPS);
-  if (state->nstamps >= MAX_STAMPS)
-    return;
-  state->stamps[state->nstamps++] = SDL_GetTicksNS();
+  // Nothing to do: sleeps run to a fixed deadline schedule, not from stamps
+  (void) opaque;
 }
 
 static int zxh_sleep_handler(int durationTStates, void *opaque)
 {
   zxh_sdl_state_t *state = opaque;
   int              paused;
-
-  // Unstack timestamps (even if we're paused)
-  assert(state->nstamps > 0);
-  if (state->nstamps <= 0)
-    return ZXH_FLAG_TEST(state, ZXH_FLAG_QUIT);
-  --state->nstamps;
 
   // Quit straight away if signalled
   if (ZXH_FLAG_TEST(state, ZXH_FLAG_QUIT))
