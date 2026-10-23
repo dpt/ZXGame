@@ -24,7 +24,6 @@
 
 #include "appengine/types.h"
 #include "appengine/app/choices.h"
-#include "appengine/base/bsearch.h"
 #include "appengine/base/messages.h"
 #include "appengine/base/os.h"
 #include "appengine/base/oserror.h"

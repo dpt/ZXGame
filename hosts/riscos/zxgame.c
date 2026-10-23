@@ -30,10 +30,10 @@
 #include "datastruct/bitfifo.h"
 #include "datastruct/list.h"
 #include "geom/box.h"
+#include "utils/barith.h"
+#include "utils/bsearch.h"
 
 #include "appengine/types.h"
-#include "appengine/base/bitwise.h"
-#include "appengine/base/bsearch.h"
 #include "appengine/base/messages.h"
 #include "appengine/base/os.h"
 #include "appengine/base/oserror.h"
