@@ -19,7 +19,7 @@ Used by [The Great Escape in C](https://github.com/dpt/The-Great-Escape-in-C) an
 include(FetchContent)
 FetchContent_Declare(ZXGame
   GIT_REPOSITORY https://github.com/dpt/ZXGame
-  GIT_TAG master)
+  GIT_TAG 0.1.0)
 FetchContent_MakeAvailable(ZXGame)
 target_link_libraries(MyGame PRIVATE ZXGameSDL3)   # or ZXGameHeadless
 zxgame_sdl3_app(MyGame)
