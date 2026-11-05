@@ -79,43 +79,29 @@ if(ZXGAME_SDL3)
 
     if(EMSCRIPTEN)
       target_compile_options(ZXGameSDL3 PUBLIC "-sUSE_SDL=3" "-pthread")
-      # CRT shader on the web build is GLSL ES over a raw GL context
-      # (WebGL1/GLES2), not SDL_GPU. Compiled at runtime by the browser.
-      target_compile_definitions(ZXGameSDL3 PRIVATE
-        ZXH_CRT_SHADER=1 ZXH_CRT_SHADER_GLES=1)
     else()
       target_link_libraries(ZXGameSDL3 PUBLIC SDL3::SDL3)
     endif()
 
     if(APPLE)
       target_link_libraries(ZXGameSDL3 PUBLIC "-framework CoreFoundation")
-      target_compile_definitions(ZXGameSDL3 PRIVATE ZXH_CRT_SHADER=1)
     endif()
 
-    # The Vulkan backend wants SPIR-V; compile the GLSL at build time.
-    if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
-      find_program(GLSLANG_VALIDATOR glslangValidator)
-      if(GLSLANG_VALIDATOR)
-        set(GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
-        set(SPIRV_HEADER ${GEN_DIR}/CRTShaderSPIRV.h)
-        file(MAKE_DIRECTORY ${GEN_DIR})
-        add_custom_command(
-          OUTPUT ${SPIRV_HEADER}
-          COMMAND ${GLSLANG_VALIDATOR} -V ${ZXGAME_SDL3_DIR}/shaders/crt.vert -o ${GEN_DIR}/crt.vert.spv
-          COMMAND ${GLSLANG_VALIDATOR} -V ${ZXGAME_SDL3_DIR}/shaders/crt.frag -o ${GEN_DIR}/crt.frag.spv
-          COMMAND ${CMAKE_COMMAND} -DINPUT=${GEN_DIR}/crt.vert.spv -DOUTPUT=${GEN_DIR}/crt_vert_spirv.h -DVARNAME=zxh_crt_vertex_spirv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedSPIRV.cmake
-          COMMAND ${CMAKE_COMMAND} -DINPUT=${GEN_DIR}/crt.frag.spv -DOUTPUT=${GEN_DIR}/crt_frag_spirv.h -DVARNAME=zxh_crt_fragment_spirv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedSPIRV.cmake
-          COMMAND ${CMAKE_COMMAND} -E cat ${GEN_DIR}/crt_vert_spirv.h ${GEN_DIR}/crt_frag_spirv.h > ${SPIRV_HEADER}
-          DEPENDS ${ZXGAME_SDL3_DIR}/shaders/crt.vert ${ZXGAME_SDL3_DIR}/shaders/crt.frag ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedSPIRV.cmake
-          VERBATIM)
-        add_custom_target(zxgame_crt_shader_spirv DEPENDS ${SPIRV_HEADER})
-        add_dependencies(ZXGameSDL3 zxgame_crt_shader_spirv)
-        target_include_directories(ZXGameSDL3 PRIVATE ${GEN_DIR})
-        target_compile_definitions(ZXGameSDL3 PRIVATE
-          ZXH_CRT_SHADER=1 ZXH_CRT_SHADER_SPIRV=1)
-      else()
-        message(STATUS "glslangValidator not found - no CRT shader on this platform")
-      endif()
+    # The CRT effect, taken alone from DPTLib so as not to need its libpng. For
+    # local work on both repos, configure with
+    # -DFETCHCONTENT_SOURCE_DIR_DPTLIB_CRT=../DPTLib
+    if(NOT TARGET DPTLibCRT)
+      include(FetchContent)
+      FetchContent_Declare(dptlib_crt
+                           GIT_REPOSITORY https://github.com/dpt/DPTLib.git
+                           GIT_TAG 02d30bfd03c47bc70898f4170b77f7f09a2ecd35
+                           SOURCE_SUBDIR libraries/sdl/crt)
+      FetchContent_MakeAvailable(dptlib_crt)
+    endif()
+    target_link_libraries(ZXGameSDL3 PUBLIC DPTLibCRT)
+    if(EMSCRIPTEN)
+      # Everything linked into a threaded wasm must be built for threads
+      target_compile_options(DPTLibCRT PRIVATE "-pthread")
     endif()
 
     # zxgame_sdl3_app(<target> [<shell.html>]): per-executable platform fix-ups.

@@ -66,11 +66,10 @@
 
 /* Whether the CRT post-effect starts switched on. Both display backends are
  * always built: the plain SDL_Renderer blit (any GPU backend,
- * nearest-neighbour scaling) and the SDL3 GPU CRT post-effect pipeline
- * (Metal on macOS, Vulkan/SPIR-V on Linux -- see CRTShader.c). F4 switches
- * between them at runtime, so this only chooses which one comes up first.
- * Set by CMake (ZXH_CRT_SHADER=1) when a shader backend is available for the
- * target platform; override with -DZXH_CRT_SHADER=1/0.
+ * nearest-neighbour scaling) and DPTLib's CRT post-effect. F4 switches between
+ * them at runtime, so this only chooses which one comes up first. On when
+ * DPTLib has a shader backend for the target platform; override with
+ * -DZXH_CRT_SHADER=1/0.
  *
  * They cannot both be live at once -- SDL_CreateRenderer and
  * SDL_ClaimWindowForGPUDevice each want the window's swapchain -- so
@@ -78,7 +77,11 @@
  * start, zxh_set_crt_enabled falls back to the plain renderer.
  */
 #ifndef ZXH_CRT_SHADER
+#ifdef DPTLIB_CRT_AVAILABLE
+#define ZXH_CRT_SHADER       (1)
+#else
 #define ZXH_CRT_SHADER       (0)
+#endif
 #endif
 
 #define MAXDIRTYRECTS        (8) // max dirty rects captured per frame before we coalesce to full-screen
@@ -166,11 +169,10 @@ static const zxh_CRT_params_t crt_default_params = {
   0.0f,
   0.0f,
   0.0f,
-  0.0f,
   0.0f
 };
 
-// Defaults tuned by eye against this game's screen; see CRTShader.c.
+// Defaults tuned by eye against this game's screen.
 static const zxh_CRT_params_t crt_tuned_params = {
   0.025f,
   0.5f,
@@ -181,7 +183,6 @@ static const zxh_CRT_params_t crt_tuned_params = {
   0.75f,
   0.3f,
   0.6f,
-  0.0f,
   0.0f
 };
 
@@ -987,7 +988,7 @@ static int zxh_renderer_create(zxh_sdl_state_t *state)
  * before, which does update normally. Metal/macOS doesn't hit this, but the
  * recreation is harmless there too -- it isn't gated to Linux only.
  */
-#if !defined(ZXH_CRT_SHADER_GLES)
+#if !defined(__EMSCRIPTEN__)
 static int zxh_video_recreate_window(zxh_sdl_state_t *state)
 {
   char            title[128];
@@ -1015,7 +1016,7 @@ static int zxh_video_recreate_window(zxh_sdl_state_t *state)
   state->video.window = window;
   return 1;
 }
-#endif /* !ZXH_CRT_SHADER_GLES */
+#endif /* !__EMSCRIPTEN__ */
 
 /* Switches the display backend. Returns 1 if the requested backend is now
  * live, 0 if it could not be created and the other one was restored instead
@@ -1030,7 +1031,7 @@ static int zxh_set_crt_enabled(zxh_sdl_state_t *state, int enable)
 
   if (enable)
   {
-#if defined(ZXH_CRT_SHADER_GLES)
+#if defined(__EMSCRIPTEN__)
     /* Conv: Emscripten's SDL video driver backs every SDL_Window with the
      * same single <canvas> element -- SDL_CreateWindow does not hand back a
      * fresh compositor surface the way it does on Linux/macOS, so the
@@ -1048,13 +1049,6 @@ static int zxh_set_crt_enabled(zxh_sdl_state_t *state, int enable)
       return 1;
     }
 
-    /* zxh_CRT_shader_create zeroes the struct before it starts, so a NULL
-     * context means it failed on the very first step and there is nothing to
-     * release.
-     */
-    if (state->video.crt.gl_context != NULL)
-      zxh_CRT_shader_destroy(&state->video.crt, state->video.window);
-    memset(&state->video.crt, 0, sizeof(state->video.crt));
     fprintf(stderr, "CRT shader unavailable; using the plain renderer\n");
 #else
     /* Only the very first claim (nothing live yet at startup) gets a window
@@ -1063,7 +1057,7 @@ static int zxh_set_crt_enabled(zxh_sdl_state_t *state, int enable)
      * checked before zxh_renderer_destroy clears video.renderer below.
      */
     int window_already_used = state->video.renderer != NULL ||
-                              state->video.crt.gpu != NULL;
+                              state->video.crt.crt != NULL;
 
     zxh_renderer_destroy(state);
 
@@ -1076,15 +1070,6 @@ static int zxh_set_crt_enabled(zxh_sdl_state_t *state, int enable)
       state->video.crt_enabled = 1;
       return 1;
     }
-
-    /* zxh_CRT_shader_create zeroes the struct before it starts, so a NULL
-     * device means it failed on the very first step and there is nothing to
-     * release; anything later leaves a device that must be given back before
-     * the plain renderer can claim the window.
-     */
-    if (state->video.crt.gpu != NULL)
-      zxh_CRT_shader_destroy(&state->video.crt, state->video.window);
-    memset(&state->video.crt, 0, sizeof(state->video.crt));
 
 crt_unavailable:
     fprintf(stderr, "CRT shader unavailable; using the plain renderer\n");
@@ -2093,8 +2078,8 @@ static int zxh_instance_create(zxh_sdl_state_t *state, const zxgame_ops_t *ops, 
   window = SDL_CreateWindow(ops->name,
                             zxh_window_width(state->video.scale),
                             zxh_window_height(state->video.scale),
-#if defined(ZXH_CRT_SHADER_GLES)
-                            /* The GLES CRT backend renders via
+#if defined(__EMSCRIPTEN__)
+                            /* The WebGL CRT backend renders via
                              * SDL_GL_CreateContext, which requires the
                              * window to have been created with this flag. */
                             SDL_WINDOW_OPENGL

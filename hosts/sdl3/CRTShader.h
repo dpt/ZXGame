@@ -10,65 +10,31 @@
 
 #include <SDL3/SDL.h>
 
+#include "sdl/crt.h"
+
 #include "ZXSpectrum/Spectrum.h"
 
-/* CRT post-effect: renders the game's converted screen buffer through a
- * fragment shader (scanlines/bloom/vignette). Metal (MSL) on macOS, Vulkan
- * (SPIR-V) on Linux via SDL's GPU API; GLSL ES over a raw GL context on
- * Emscripten (SDL3 GPU has no stable WebGPU backend yet) -- see CRTShader.c's
- * platform gating.
+/* CRT post-effect: renders the game's converted screen buffer through DPTLib's
+ * CRT shader, burning in the OSD on the way, as this path has no SDL_Renderer
+ * to draw it with.
  */
 typedef struct
 {
-#if defined(ZXH_CRT_SHADER_GLES)
-  SDL_GLContext gl_context;
-  unsigned int  program;
-  unsigned int  texture;  // GLuint, avoids pulling in GLES headers here
-  unsigned int  vbo;
-  int           texture_w; // dimensions the texture was last allocated at --
-  int           texture_h; // glTexSubImage2D reuses storage when unchanged
-  int           uniform_locs[13]; // GLint, cached at link time -- see
-                                   // zxh_gles_uniform in CRTShader.c
-  void         *composite_buf;    // scratch buffer for OSD compositing,
-  size_t        composite_cap;    // grown/reused across frames rather than
-                                   // malloc'd/freed each one
-#else
-  SDL_GPUDevice         *gpu;
-  SDL_GPUTexture        *texture;         // holds the game's converted screen
-  SDL_GPUTransferBuffer *transfer_buffer; // staging buffer for the upload above
-  SDL_GPUSampler        *sampler;
-  SDL_GPUGraphicsPipeline *pipeline;
-#endif
+  crt_t    *crt;
+  uint32_t *scratch; // the frame being presented, with any OSD composited
 } zxh_CRT_shader_t;
 
-/* Tunable shader knobs, pushed to the fragment shader as a uniform each
- * frame. Layout must match the MSL Params struct in CRTShader.c exactly
- * (plain floats, same order, no padding).
- */
-typedef struct
-{
-  float curvature;          // barrel distortion strength
-  float bloom_threshold;    // luminance level above which bloom kicks in
-  float bloom_intensity;    // bloom contribution scale
-  float brightness;         // post-contrast multiplicative brightness
-  float contrast;           // contrast around mid-grey
-  float saturation;         // 1.0 = full colour, 0.0 = greyscale
-  float scanline_intensity; // base scanline darkening amount
-  float vignette_strength;  // corner darkening strength
-  float chroma_bleed;       // PAL horizontal colour smear, 0.0 = off
-  float glitch;             // mains flicker + scanline tear, 0.0 = off
-  float time;               // seconds since start; filled in by the renderer
-} zxh_CRT_params_t;
+typedef crt_params_t zxh_CRT_params_t;
 
 /**
- * Creates the GPU device, texture, sampler and shader pipeline. Must be
- * called once, after the SDL window is created.
+ * Creates the shader. Must be called after the SDL window is created.
  *
  * \param[out] shader      Shader state to initialise.
- * \param[in]  window      SDL window to claim for the GPU device.
+ * \param[in]  window      SDL window to claim.
  * \param[in]  game_width  Width in pixels of the game's screen buffer.
  * \param[in]  game_height Height in pixels of the game's screen buffer.
- * \return 1 on success, 0 on failure (an error is printed to stderr).
+ * \return 1 on success, 0 on failure (an error is printed to stderr), in which
+ *         case nothing needs releasing.
  */
 int zxh_CRT_shader_create(zxh_CRT_shader_t *shader,
                           SDL_Window       *window,
@@ -82,10 +48,10 @@ int zxh_CRT_shader_create(zxh_CRT_shader_t *shader,
  * \param[in,out] shader      Shader state, as created by zxh_CRT_shader_create.
  * \param[in]     window      SDL window to present into.
  * \param[in]     zx          Facade instance to claim the screen buffer from.
- * \param[in]     x           Destination viewport X offset, in pixels.
- * \param[in]     y           Destination viewport Y offset, in pixels.
- * \param[in]     w           Destination viewport width, in pixels.
- * \param[in]     h           Destination viewport height, in pixels.
+ * \param[in]     x           Destination viewport X offset, in window units.
+ * \param[in]     y           Destination viewport Y offset, in window units.
+ * \param[in]     w           Destination viewport width, in window units.
+ * \param[in]     h           Destination viewport height, in window units.
  * \param[in]     game_width  Width in pixels of the game's screen buffer.
  * \param[in]     game_height Height in pixels of the game's screen buffer.
  * \param[in]     params      Shader tuning parameters for this frame.
@@ -93,10 +59,7 @@ int zxh_CRT_shader_create(zxh_CRT_shader_t *shader,
  *                            top-down: 0 = untouched, 1 = bright green OSD
  *                            text, 2 = black outline stamped behind the
  *                            text. Composited over the uploaded frame
- *                            before the shader pass. NULL to skip -- there
- *                            is no SDL_Renderer in this path for the caller
- *                            to draw an OSD with itself, so this is how it
- *                            gets composited.
+ *                            before the shader pass. NULL to skip.
  * \param[in]     override_pixels Optional game_width*game_height ABGR8888
  *                            pixel buffer to upload instead of the game's
  *                            screen buffer (e.g. the backbuffer debug view).
@@ -119,7 +82,7 @@ void zxh_CRT_shader_render(zxh_CRT_shader_t       *shader,
  * Releases everything created by zxh_CRT_shader_create.
  *
  * \param[in,out] shader Shader state to release.
- * \param[in]     window SDL window to release the GPU device from.
+ * \param[in]     window SDL window to release.
  */
 void zxh_CRT_shader_destroy(zxh_CRT_shader_t *shader, SDL_Window *window);
 
