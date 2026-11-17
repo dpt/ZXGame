@@ -21,28 +21,29 @@ sound), and for sharing one audio renderer across all ZXGame front-ends.
 
 ### 1. A shared renderer
 
-Move the SDL host's event queue and renderer into
-`src/ZXSpectrum/Audio.c`. It turns timestamped speaker and AY events into
-signed 16-bit mono at a host-chosen rate, with DC blocking. Rough API:
+**Done.** `zxsound_t` (`include/ZXSpectrum/Sound.h`, `src/ZXSpectrum/Sound.c`)
+is the SDL host's event queue and renderer, moved. It turns timestamped
+speaker and AY events into signed 16-bit mono (optionally duplicated to
+stereo) at a host-chosen rate, with DC blocking. `test/SoundTest.c` checks it.
 
-```c
-zxaudio_t *zxaudio_create(int rate, int tstates_per_sec);
-void       zxaudio_speaker(zxaudio_t *a, int level, zxclock_t tstates);
-void       zxaudio_ay(zxaudio_t *a, uint16_t port, uint8_t byte, zxclock_t tstates);
-void       zxaudio_render(zxaudio_t *a, int16_t *buf, int n);
-```
+It differs from the SDL original in two ways, both forced by Norcroft C having
+no 64-bit integers or cheap floating point:
+
+* Events are timed in T-states (32-bit, modular), not wall-clock
+  nanoseconds. The replay cursor steps through T-states at the Z80 rate
+  scaled by game speed, and re-anchors to the next event less a cushion
+  whenever the queue runs dry. Nothing relates the game clock to wall time;
+  the re-anchor on underrun was already what kept the two in step.
+* The DC-block filter and AY gain are fixed point.
 
 Each host then only delivers samples: an SDL stream, a Core Audio render
-callback, a SharedSoundBuffer block or an 8-bit log buffer. SDL keeps its
-behaviour; macOS and RISC OS 16-bit gain correct speaker timing and AY output.
-
-The renderer must not use floating point. The SDL DC-block filter uses
-`float` today and needs converting to fixed point.
+callback, a SharedSoundBuffer block or an 8-bit log buffer. macOS and RISC OS
+16-bit gain correct speaker timing and AY output.
 
 ### 2. Choose the output path at start-up
 
 * SharedSound/SharedSoundBuffer present on 16-bit hardware: keep the existing
-  stream, fed by `zxaudio_render`.
+  stream, fed by `zxsound_render`.
 * Otherwise (the `RMEnsure`s fail, or `Sound_Mode` reports no 16-bit
   support): the 8-bit path below.
 

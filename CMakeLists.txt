@@ -33,6 +33,7 @@ add_library(ZXSpectrum STATIC
   src/ZXSpectrum/Kempston.c
   src/ZXSpectrum/Keyboard.c
   src/ZXSpectrum/Screen.c
+  src/ZXSpectrum/Sound.c
   src/ZXSpectrum/Spectrum.c
   src/ZXSpectrum/Z80.c
   src/ZXSpectrum/slopay-chip.c)
@@ -196,6 +197,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 
   enable_testing()
   add_test(NAME headless COMMAND NullGameHeadless -frames 1000)
+
+  add_executable(SoundTest test/SoundTest.c)
+  target_link_libraries(SoundTest ZXSpectrum)
+  add_test(NAME sound COMMAND SoundTest)
 
   if(TARGET ZXGameSDL3)
     add_executable(NullGameSDL3 test/NullGame.c)
