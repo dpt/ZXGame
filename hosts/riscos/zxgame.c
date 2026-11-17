@@ -27,7 +27,6 @@
 #include "oslib/wimp.h"
 #include "oslib/wimpreadsysinfo.h"
 
-#include "datastruct/bitfifo.h"
 #include "datastruct/list.h"
 #include "geom/box.h"
 #include "utils/barith.h"
@@ -49,6 +48,7 @@
 
 #include "ZXSpectrum/Kempston.h"
 #include "ZXSpectrum/Keyboard.h"
+#include "ZXSpectrum/Sound.h"
 #include "ZXSpectrum/Spectrum.h"
 
 #include "globals.h"
@@ -88,11 +88,9 @@ static int have_saves(void)
 
 #define SAMPLE_RATE     (44100)
 #define PERIOD          (10)    /* fraction of a second (10 => 0.1s) */
-#define BUFFER_SAMPLES  (SAMPLE_RATE / PERIOD)
-#define BITS_SAMPLE     (5)     /* magic value: we take the mean of this many input bits to make an output sample */
-#define BITFIFO_LENGTH  (BUFFER_SAMPLES * BITS_SAMPLE) /* in bits */
-
-#define MAXVOL          (32767 / 8)
+#define BUFFER_SAMPLES  (SAMPLE_RATE / PERIOD) /* most rendered per null event */
+#define SOUND_CUSHION_MS (50)   /* absorbs null event jitter */
+#define SOUND_PRIME_CS  (5)     /* rendered up front when the stream opens */
 
 /* ----------------------------------------------------------------------- */
 
@@ -184,10 +182,11 @@ struct zxgame
 
   struct
   {
-    int                 index;
-    bitfifo_t          *fifo;
+    zxsound_t          *sound;
     ssndbuf_t           stream;
-    unsigned int       *data;
+    int16_t            *data;   /* BUFFER_SAMPLES stereo frames */
+    int                 speed;  /* speed last given to sound */
+    os_t                last_cs; /* when emit_sound last rendered */
   }
   audio;
 };
@@ -679,14 +678,19 @@ static result_t setup_sound(zxgame_t *zxgame)
   if (zxgame->audio.stream != 0)
     return result_OK; /* already setup */
 
-  zxgame->audio.fifo = bitfifo_create(BITFIFO_LENGTH);
-  if (zxgame->audio.fifo == NULL)
+  zxgame->audio.sound = zxsound_create(SAMPLE_RATE,
+                                       zxgame->launch.model == ZXGAME_MODEL_128K ?
+                                         Z80_CLOCK_128K : Z80_CLOCK_48K,
+                                       SOUND_CUSHION_MS,
+                                       2);
+  if (zxgame->audio.sound == NULL)
   {
      err = result_OOM;
      goto Failure;
   }
+  zxgame->audio.speed = 100;
 
-  zxgame->audio.data = malloc(BUFFER_SAMPLES * 4);
+  zxgame->audio.data = malloc(BUFFER_SAMPLES * 2 * sizeof(*zxgame->audio.data));
   if (zxgame->audio.data == NULL)
   {
      err = result_OOM;
@@ -703,6 +707,8 @@ static result_t setup_sound(zxgame_t *zxgame)
     goto Failure;
   }
 
+  zxgame->audio.last_cs = os_read_monotonic_time() - SOUND_PRIME_CS;
+
   return result_OK;
 
 
@@ -710,8 +716,8 @@ Failure:
   free(zxgame->audio.data);
   zxgame->audio.data = NULL;
 
-  bitfifo_destroy(zxgame->audio.fifo);
-  zxgame->audio.fifo = NULL;
+  zxsound_destroy(zxgame->audio.sound);
+  zxgame->audio.sound = NULL;
 
   return err;
 }
@@ -730,46 +736,45 @@ static void teardown_sound(zxgame_t *zxgame)
   free(zxgame->audio.data);
   zxgame->audio.data = NULL;
 
-  bitfifo_destroy(zxgame->audio.fifo);
-  zxgame->audio.fifo = NULL;
+  /* ponytail: AY register state goes with it, so music may stay silent after
+   * sound is toggled back on until the game rewrites its registers. */
+  zxsound_destroy(zxgame->audio.sound);
+  zxgame->audio.sound = NULL;
 }
 
+/* Render the sound for the wall time elapsed since the last call, and hand it
+ * to the stream.
+ *
+ * ponytail: paced by the monotonic clock, not the stream's consumption, so
+ * the two clocks drifting apart slowly grows or drains the stream's buffer.
+ * Pace from SharedSoundBuffer_BufferStats if that is ever audible. */
 static void emit_sound(zxgame_t *zxgame)
 {
-  result_t      err;
-  int           fetch;
-  unsigned int *p;
-  size_t        databytes;
+  result_t err;
+  os_t     now;
+  int      frames;
 
   err = setup_sound(zxgame);
   if (err)
     return;
 
-  fetch = BITS_SAMPLE * zxgame->speed / NORMSPEED;
-  fetch = CLAMP(fetch, 1, 32);
-
-  p = zxgame->audio.data;
-  for (;;)
+  if (zxgame->audio.speed != zxgame->speed)
   {
-    unsigned int bitqueue = 0;
-    unsigned int vol      = 0;
-
-    err = bitfifo_dequeue(zxgame->audio.fifo, &bitqueue, fetch);
-    if (err)
-      break;
-
-    vol = countbits(bitqueue) * MAXVOL / fetch;
-    *p++ = (vol << 0) | (vol << 16);
-    if (p >= zxgame->audio.data + BUFFER_SAMPLES * 4)
-      break;
+    zxgame->audio.speed = zxgame->speed;
+    zxsound_set_speed(zxgame->audio.sound, zxgame->speed);
   }
 
-  databytes = (p - zxgame->audio.data) * 4;
-  if (databytes)
-    (void) _swix(SharedSoundBuffer_AddBlock, _INR(0,2), zxgame->audio.stream,
-                                                        zxgame->audio.data,
-                                                        databytes);
+  now    = os_read_monotonic_time();
+  frames = (int) (now - zxgame->audio.last_cs) * (SAMPLE_RATE / 100);
+  zxgame->audio.last_cs = now;
+  frames = CLAMP(frames, 0, BUFFER_SAMPLES); /* a long stall is dropped */
+  if (frames == 0)
+    return;
 
+  zxsound_render(zxgame->audio.sound, zxgame->audio.data, frames);
+  (void) _swix(SharedSoundBuffer_AddBlock, _INR(0,2), zxgame->audio.stream,
+                                                      zxgame->audio.data,
+                                                      frames * 2 * sizeof(*zxgame->audio.data));
 }
 
 /* Game callback. */
@@ -777,19 +782,31 @@ static void speaker_handler(int on_off, zxclock_t tstates, void *opaque)
 {
   const unsigned int SOUNDFLAGS = zxgame_FLAG_HAVE_SOUND | zxgame_FLAG_SOUND_ON;
 
-  result_t      err;
-  zxgame_t     *zxgame = opaque;
-  unsigned int  bits;
+  zxgame_t *zxgame = opaque;
 
   if ((zxgame->flags & SOUNDFLAGS) != SOUNDFLAGS)
     return;
 
-  err = setup_sound(zxgame);
-  if (err)
+  if (setup_sound(zxgame))
     return;
 
-  bits = on_off;
-  (void) bitfifo_enqueue(zxgame->audio.fifo, &bits, 0, 1);
+  zxsound_speaker(zxgame->audio.sound, on_off, tstates);
+}
+
+/* Game callback. */
+static void ay_out_handler(uint16_t port, uint8_t byte, zxclock_t tstates, void *opaque)
+{
+  const unsigned int SOUNDFLAGS = zxgame_FLAG_HAVE_SOUND | zxgame_FLAG_SOUND_ON;
+
+  zxgame_t *zxgame = opaque;
+
+  if ((zxgame->flags & SOUNDFLAGS) != SOUNDFLAGS)
+    return;
+
+  if (setup_sound(zxgame))
+    return;
+
+  zxsound_ay_out(zxgame->audio.sound, port, byte, tstates);
 }
 
 /* ----------------------------------------------------------------------- */
@@ -1738,7 +1755,7 @@ result_t zxgame_create(zxgame_t **new_zxgame, const char *startup_game)
     &key_handler,
     &border_handler,
     &speaker_handler,
-    NULL, /* ay_out */
+    &ay_out_handler,
     ZX_PIXEL_INDEXED4
   };
 

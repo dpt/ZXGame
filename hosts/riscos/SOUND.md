@@ -93,7 +93,10 @@ optimising.
    one check that renders a known speaker pattern and compares the output.
 2. **Done.** Switch SDL to the shared renderer. Confirm by ear that Chase
    H.Q.'s title drums are unchanged.
-3. Switch RISC OS 16-bit to it and connect `ay_out`.
+3. **Done.** Switch RISC OS 16-bit to it and connect
+   `ay_out`. `emit_sound` renders the wall time elapsed since its last call
+   (monotonic centiseconds, at most `PERIOD`) into the SharedSoundBuffer
+   stream.
 4. Add the 8-bit path. Test under Arculator (RISC OS 3.1) before real
    hardware.
 
