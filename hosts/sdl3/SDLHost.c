@@ -28,7 +28,7 @@
 #include "ZXSpectrum/Spectrum.h"
 #include "ZXSpectrum/Keyboard.h"
 #include "ZXSpectrum/Kempston.h"
-#include "ZXSpectrum/slopay-chip.h"
+#include "ZXSpectrum/Sound.h"
 
 #include "ZXGame/Game.h"
 
@@ -86,40 +86,12 @@
 
 #define MAXDIRTYRECTS        (8) // max dirty rects captured per frame before we coalesce to full-screen
 
-#define AY_CLOCK_FREQ  (1773400) // ZX Spectrum 128K AY-3-8912 clock rate
-#define AY_SAMPLE_RATE   (44100)
-#define AY_VOLUME_PCT       (20) // 0..AY_MASTER_VOLUME_MAX
+#define AY_SAMPLE_RATE   (44100) // preferred output rate; see audio.sample_rate
 
-#define BEEPER_VOLUME_PCT   (20) // 48K beeper level, percent of full scale
-#define BEEPER_AMPLITUDE  (32767 * BEEPER_VOLUME_PCT / 100)
-
-/* SlopAY-style beeper/AY mix: the beeper is a hard on/off level, so summing
- * it straight into the AY signal biases the waveform upward whenever it is
- * high. AY_GAIN_WITH_BEEPER headroom keeps that sum inside int16 range, and
- * the DC-block one-pole highpass removes the resulting bias before the sum.
- */
-#define AY_GAIN_WITH_BEEPER (0.90f)
-#define BEEPER_DC_BLOCK_R   (0.995f)
-
-/* Sampled speech drives the AY DAC by writing a new volume-register value
- * every ~120us (~8.4KHz) from the game thread. The audio thread only pulls
- * PCM from slopay_chip_get_sample() in bursts whenever SDL wants more data,
- * so a naive "read the current register value" approach loses every write
- * that happened between bursts. Instead, register writes are queued here
- * with a timestamp and replayed one sample at a time against a matching
- * virtual audio clock (see zxh_apply_due_audio_events), so the reconstructed
- * waveform reflects the write history rather than a single stale snapshot.
- * The same queue carries 48K beeper level changes, timestamped from the
- * game's virtual T-state clock (see zxh_speaker_handler).
- */
-#define AY_QUEUE_CAPACITY (65536) // play_speech_128k queues 3 AY writes/nibble
-                                  // (channels A/B/C), not 1 -- the longest
-                                  // speech sample (0x14E6 bytes) needs ~32000
-                                  // slots; this leaves headroom above that
-
-/* Replay cursor anchor cushion; see the replay cursor comment in
- * zxh_sdl_state_t. Emscripten's game thread falls behind wall-clock more
- * often (pthread scheduling jitter, no realtime priority), so it needs more
+/* Replay cursor anchor cushion: the output latency zxsound_t adds each time
+ * its queue runs dry and it re-anchors (see Sound.h). Emscripten's game
+ * thread falls behind wall-clock more often (pthread scheduling jitter, no
+ * realtime priority), so it needs more
  * lead time before playback catches up to avoid repeated re-anchors -- each
  * one is an audible stutter, and it happens often enough during dense speech
  * playback to sound like scratchiness.
@@ -133,9 +105,9 @@
  * modestly above desktop's is enough.
  */
 #ifdef __EMSCRIPTEN__
-#define AY_REPLAY_CUSHION_NS (50000000ULL)
+#define SOUND_CUSHION_MS (50)
 #else
-#define AY_REPLAY_CUSHION_NS (30000000ULL)
+#define SOUND_CUSHION_MS (30)
 #endif
 
 /* How far the game thread may fall behind its schedule before the backlog is
@@ -200,22 +172,6 @@ static int zxh_window_height(int scale)
 
 // -----------------------------------------------------------------------------
 
-typedef enum
-{
-  ZXH_AUDIO_EVENT_AY,     // AY register write (128K music/speech)
-  ZXH_AUDIO_EVENT_SPEAKER // beeper EAR level change (48K bit-banged sfx)
-}
-zxh_audio_event_type_t;
-
-typedef struct
-{
-  Uint64                 time_ns; // when this write happened, relative to SDL_GetTicksNS()
-  zxh_audio_event_type_t type;
-  slopay_chip_reg_t      reg;     // AY events only
-  Uint8                  value;   // AY: register value; speaker: level 0/1
-}
-zxh_audio_event_t;
-
 // zxh_sdl_state_t.flags bits
 #define ZXH_FLAG_QUIT      (1u << 0)
 #define ZXH_FLAG_PAUSED    (1u << 1)
@@ -266,54 +222,11 @@ typedef struct zxh_sdl_state
      */
     int             sample_rate;
 
-    slopay_chip_t  *ay;
-    slopay_chip_reg_t ay_latched_reg; // register selected by last port_AY_REGISTER write
+    /* Speaker and AY renderer. The game thread queues events, the audio
+     * thread renders them; lock serialises every call into it. */
+    zxsound_t      *sound;
+    SDL_Mutex      *lock;
 
-    /* Timestamped audio event queue (AY register writes and beeper level
-     * changes): game thread produces, audio thread consumes. queue_mutex
-     * guards head/tail and the slots between them.
-     */
-    SDL_Mutex        *queue_mutex;
-    zxh_audio_event_t queue[AY_QUEUE_CAPACITY];
-    int               queue_head;
-    int               queue_tail;
-
-    /* Audio clock anchor, mapping the facade's virtual T-state clock onto
-     * wall-clock ns. The game thread emits a frame's worth of audio in a
-     * fraction of that frame's wall time, so event times extrapolate from
-     * the anchor at the T-state rate rather than being read off the wall
-     * clock; if the T-state clock falls behind wall time the game thread
-     * has lost ground and the anchor resets to catch up. Game thread only.
-     *
-     * Both event types must go through this: they share one queue and one
-     * replay cursor, so timestamping AY writes off the wall clock while the
-     * beeper used the T-state clock made every frame's drums land wherever
-     * the two clocks happened to disagree.
-     */
-    Uint64          anchor_ns;
-    Uint64          anchor_tstates;
-    int             speaker_last_level;  // last queued level (game thread)
-    int             speaker_level;       // current replay level (audio thread)
-    float           speaker_dc_prev_in;  // DC-block filter state (audio thread)
-    float           speaker_dc_prev_out; // DC-block filter state (audio thread)
-
-    /* Replay cursor: maps generated samples onto event timestamps. The wall
-     * clock and the audio device's sample clock drift apart (measured
-     * ~1.4ms/s here), so event times are never compared against a
-     * wall-clock-anchored sample time. Instead, whenever the queue runs dry
-     * the cursor re-anchors to the next event's timestamp minus
-     * AY_REPLAY_CUSHION_NS, then advances by exactly one sample period per
-     * generated sample. Spacing within a burst is preserved regardless of
-     * drift and every gap in the audio re-syncs the two clocks. The cushion
-     * (extra output latency) absorbs consumer-fast drift so a continuous
-     * stream (a speech sample) does not starve mid-burst: at the measured
-     * drift, 30ms lasts ~21s of continuous writes and speech samples are
-     * only ~1-2s long.
-     */
-    Uint64          samples_played;
-    Uint64          replay_anchor_ns;     // event time at the last anchor
-    Uint64          replay_anchor_sample; // samples_played at the last anchor
-    int             replay_anchored;      // bool; cleared when queue runs dry
     int             muted;                // bool; mute audio if true
     int             ay_channel_muted[3];  // bool per AY channel A/B/C; toggled with F7/F8/F9
     int             speaker_muted;        // bool; beeper sfx muted; toggled with F10
@@ -541,101 +454,13 @@ static void zxh_border_handler(int colour, void *opaque)
   NOT_USED(opaque);
 }
 
-static void zxh_audio_queue_push(zxh_sdl_state_t       *state,
-                                 Uint64                 time_ns,
-                                 zxh_audio_event_type_t type,
-                                 slopay_chip_reg_t      reg,
-                                 Uint8                  value)
-{
-  SDL_LockMutex(state->audio.queue_mutex);
-
-  {
-    int next_tail = (state->audio.queue_tail + 1) % AY_QUEUE_CAPACITY;
-
-    if (next_tail != state->audio.queue_head) // drop event if the queue is full
-    {
-      zxh_audio_event_t *ev = &state->audio.queue[state->audio.queue_tail];
-
-      ev->time_ns = time_ns;
-      ev->type    = type;
-      ev->reg     = reg;
-      ev->value   = value;
-
-      state->audio.queue_tail = next_tail;
-    }
-  }
-
-  SDL_UnlockMutex(state->audio.queue_mutex);
-}
-
-// Maps a virtual T-state to the wall-clock ns the event should be heard at.
-// 1 T-state = 1e9 / tstatesPerSec ns, where tstatesPerSec matches the Z80
-// clock zxh_sleep_handler paces the game thread against (3.5MHz on 48K,
-// 3.5469MHz on 128K) — using the wrong one here mis-schedules every AY and
-// beeper event's real playback time by the same ratio zxh_sleep_handler
-// would otherwise mis-pace the game thread, and this is the function that
-// actually drives it, not the pacing loop. Game thread only; see the anchor
-// comment in zxh_sdl_state_t.
-static Uint64 zxh_tstates_to_ns(zxh_sdl_state_t *state, zxclock_t tstates)
-{
-  const double tstatesPerSec = ZXH_FLAG_TEST(state, ZXH_FLAG_MODE_128K)
-                                     ? (double) Z80_CLOCK_128K
-                                     : (double) Z80_CLOCK_48K;
-  const double nsPerTstate   = 1.0e9 / tstatesPerSec;
-  Uint64       now_ns;
-  Uint64       event_ns;
-
-  now_ns = SDL_GetTicksNS();
-
-  // Scaled by the speed setting for the same reason zxh_sleep_handler scales
-  // its sleep: at 200% the game emits two frames of T-states in one frame of
-  // wall time, so a fixed rate would date every event further into the
-  // future than the last and the anchor would never catch up.
-  //
-  // The anchor is advanced to this event every call (below), not left fixed
-  // across the whole queue's lifetime: state->speed can change between
-  // calls, and scaling a long-lived (tstates - anchor_tstates) span by
-  // whatever speed happens to be current would retroactively rescale every
-  // event's already-elapsed history in one jump, producing an audible pop.
-  // Advancing the anchor each call means the speed scaling only ever applies
-  // to the small delta since the previous event.
-  event_ns = state->audio.anchor_ns +
-             (Uint64) ((tstates - state->audio.anchor_tstates) * nsPerTstate *
-                       100 / state->speed);
-#ifdef __EMSCRIPTEN__
-  /* Conv: snapping straight to now_ns the instant the T-state clock falls
-   * behind wall clock collapses every subsequent event onto "now", discarding
-   * the spacing between them. Under Emscripten's thread scheduling the game
-   * thread routinely runs a few ms behind during a dense write burst (e.g.
-   * play_speech_128k's nibble loop), so this branch fires almost every call
-   * and the "sample-accurate" DAC replay loses its accuracy. Bound the
-   * catch-up instead of snapping it, so relative spacing survives a bounded
-   * lag; only clamp harder once genuinely far behind (a stall, not jitter).
-   */
-  if (event_ns + 200000000ULL < now_ns)
-    event_ns = now_ns - 200000000ULL;
-#else
-  if (event_ns < now_ns) // T-state clock fell behind wall clock: re-anchor
-    event_ns = now_ns;
-#endif
-
-  state->audio.anchor_ns      = event_ns;
-  state->audio.anchor_tstates = tstates;
-
-  return event_ns;
-}
-
 static void zxh_speaker_handler(int on_off, zxclock_t tstates, void *opaque)
 {
   zxh_sdl_state_t *state = opaque;
 
-  if (on_off == state->audio.speaker_last_level)
-    return; // level unchanged: no edge to reproduce
-
-  state->audio.speaker_last_level = on_off;
-
-  zxh_audio_queue_push(state, zxh_tstates_to_ns(state, tstates),
-                       ZXH_AUDIO_EVENT_SPEAKER, 0, on_off);
+  SDL_LockMutex(state->audio.lock);
+  zxsound_speaker(state->audio.sound, on_off, tstates);
+  SDL_UnlockMutex(state->audio.lock);
 }
 
 static void zxh_ay_out_handler(uint16_t  port,
@@ -645,172 +470,41 @@ static void zxh_ay_out_handler(uint16_t  port,
 {
   zxh_sdl_state_t *state = opaque;
 
-  if (port == port_AY_REGISTER)
-  {
-    /* Register select: only ever touched from the game thread, immediately
-     * followed by the paired data write below, so no queuing needed here.
-     */
-    state->audio.ay_latched_reg = byte;
-    return;
-  }
-
-  /* port_AY_DATA: queue the write with a timestamp instead of applying it
-   * immediately, so zxh_audio_callback can replay it at the right sample
-   * position (see the AY_QUEUE_CAPACITY comment above). Timestamped from the
-   * same T-state clock as the beeper: the queue is a FIFO drained in order,
-   * so two clocks here means one stream's events are ordered against times
-   * the other's were never measured on.
-   */
-  zxh_audio_queue_push(state,
-                       zxh_tstates_to_ns(state, tstates),
-                       ZXH_AUDIO_EVENT_AY,
-                       state->audio.ay_latched_reg,
-                       byte);
-}
-
-/* Applies any queued audio events (AY register writes and beeper level
- * changes) due within the current output sample's period, and returns the
- * beeper contribution for that sample. Called once per generated sample
- * from zxh_audio_callback so rapid writes (e.g. sampled speech) land on the
- * correct output sample rather than all being collapsed into whichever
- * value was current when the audio callback happened to run. See the replay
- * cursor comment in zxh_sdl_state_t for how clock drift is handled.
- *
- * Beeper level changes can arrive faster than the sample rate (the 48K
- * engine tone toggles every ~60 T-states, under one 44.1kHz sample), so
- * sampling the instantaneous level would alias or silence them entirely.
- * Instead the level is integrated over the sample period (a box filter):
- * the returned value is BEEPER_AMPLITUDE scaled by the fraction of the
- * period the speaker spent high.
- *
- * Caller holds audio.queue_mutex. It is taken once per callback rather than
- * once per sample because SDL3's Emscripten backend runs this on the main
- * browser thread, which cannot Atomics.wait -- a contended lock spin-waits
- * there, and the game Worker contends heavily during speech playback (three
- * AY writes per nibble). 44kHz of lock traffic on the thread that also runs
- * the render frame is what starves the ScriptProcessorNode.
- */
-static int zxh_apply_due_audio_events(zxh_sdl_state_t *state)
-{
-  Uint64 start_ns; // sample period start on the replay cursor timeline
-  Uint64 end_ns;   // sample period end
-  Uint64 level_ns; // start of the current beeper level within the period
-  Uint64 high_ns;  // time spent high within the period
-  int    beeper;
-
-  if (state->audio.queue_head == state->audio.queue_tail)
-  {
-    state->audio.replay_anchored = 0;
-
-    // No pending edges: the speaker holds its level for the whole period.
-    beeper = state->audio.speaker_level ? BEEPER_AMPLITUDE : 0;
-  }
-  else
-  {
-    if (!state->audio.replay_anchored)
-    {
-      Uint64 head_time_ns = state->audio.queue[state->audio.queue_head].time_ns;
-
-      /* SDL_GetTicksNS() starts near zero, so guard the cushion subtraction
-       * against underflow for writes made just after launch.
-       */
-      state->audio.replay_anchor_ns =
-        (head_time_ns > AY_REPLAY_CUSHION_NS) ?
-          head_time_ns - AY_REPLAY_CUSHION_NS : 0;
-      state->audio.replay_anchor_sample = state->audio.samples_played;
-      state->audio.replay_anchored      = 1;
-    }
-
-    /* Computed fresh from the anchor rather than accumulated, so truncation
-     * never drifts the cursor away from the sample count.
-     */
-    start_ns = state->audio.replay_anchor_ns +
-               ((state->audio.samples_played - state->audio.replay_anchor_sample) *
-                1000000000ULL) / (Uint64) state->audio.sample_rate;
-    end_ns   = state->audio.replay_anchor_ns +
-               ((state->audio.samples_played + 1 - state->audio.replay_anchor_sample) *
-                1000000000ULL) / (Uint64) state->audio.sample_rate;
-
-    level_ns = start_ns;
-    high_ns  = 0;
-
-    while (state->audio.queue_head != state->audio.queue_tail)
-    {
-      zxh_audio_event_t *ev = &state->audio.queue[state->audio.queue_head];
-
-      if (ev->time_ns > end_ns)
-        break;
-
-      if (ev->type == ZXH_AUDIO_EVENT_AY)
-      {
-        slopay_chip_write_register(state->audio.ay, ev->reg, ev->value);
-      }
-      else
-      {
-        Uint64 edge_ns = ev->time_ns;
-
-        if (edge_ns < start_ns) // overdue edge: takes effect at period start
-          edge_ns = start_ns;
-        if (state->audio.speaker_level)
-          high_ns += edge_ns - level_ns;
-        level_ns                   = edge_ns;
-        state->audio.speaker_level = ev->value;
-      }
-
-      state->audio.queue_head = (state->audio.queue_head + 1) %
-                                AY_QUEUE_CAPACITY;
-    }
-
-    if (state->audio.speaker_level)
-      high_ns += end_ns - level_ns;
-
-    beeper = (int) ((Uint64) BEEPER_AMPLITUDE * high_ns /
-                    (end_ns - start_ns));
-  }
-
-  return state->audio.speaker_muted ? 0 : beeper;
-}
-
-// One-pole highpass removing the DC bias the box-filtered beeper level
-// (zxh_apply_due_audio_events) introduces before it is summed with the AY
-// signal. Filter state lives on the audio thread only.
-static float zxh_beeper_dc_block(zxh_sdl_state_t *state, int beeper_raw)
-{
-  float in;
-  float out;
-
-  in  = (float) beeper_raw;
-  out = (in - state->audio.speaker_dc_prev_in) +
-        (BEEPER_DC_BLOCK_R * state->audio.speaker_dc_prev_out);
-
-  state->audio.speaker_dc_prev_in  = in;
-  state->audio.speaker_dc_prev_out = out;
-
-  return out;
+  SDL_LockMutex(state->audio.lock);
+  zxsound_ay_out(state->audio.sound, port, byte, tstates);
+  SDL_UnlockMutex(state->audio.lock);
 }
 
 // Runs on SDL's audio thread. Called whenever SDL wants more data queued.
+//
+// The lock is taken once per chunk rather than once per sample because
+// SDL3's Emscripten backend runs this on the main browser thread, which
+// cannot Atomics.wait -- a contended lock spin-waits there, and the game
+// Worker contends heavily during speech playback (three AY writes per
+// nibble). 44kHz of lock traffic on the thread that also runs the render
+// frame is what starves the ScriptProcessorNode.
 static void zxh_audio_callback(void            *opaque,
                                SDL_AudioStream *stream,
                                int              additional_amount,
                                int              total_amount)
 {
-  zxh_sdl_state_t     *state = opaque;
-  int16_t              buf[512]; // 256 stereo pairs per chunk
-  int                  npairs;
-  int                  framebytes; // bytes per stereo frame (L + R, 16-bit)
-  int                  chunkbytes;
-  int                  i;
-  slopay_chip_sample_t sample;
+  zxh_sdl_state_t *state = opaque;
+  int16_t          buf[512]; // 256 stereo pairs per chunk
+  int              npairs;
+  int              framebytes; // bytes per stereo frame (L + R, 16-bit)
+  int              chunkbytes;
+  int              volume;
+  int              i;
 
   NOT_USED(total_amount);
 
   // The device is opened (and, on Emscripten, its ScriptProcessorNode
-  // connected) before the AY is created at the device's own rate.
-  if (state->audio.ay == NULL)
+  // connected) before the renderer is created at the device's own rate.
+  if (state->audio.sound == NULL)
     return;
 
   framebytes = 2 * (int) sizeof(*buf);
+  volume     = state->audio.muted ? 0 : state->audio.volume;
 
   while (additional_amount > 0)
   {
@@ -820,37 +514,13 @@ static void zxh_audio_callback(void            *opaque,
     if (npairs <= 0)
       break;
 
-    // One lock for the whole chunk; see zxh_apply_due_audio_events.
-    SDL_LockMutex(state->audio.queue_mutex);
+    SDL_LockMutex(state->audio.lock);
+    zxsound_render(state->audio.sound, buf, npairs);
+    SDL_UnlockMutex(state->audio.lock);
 
-    for (i = 0; i < npairs; i++)
-    {
-      int   beeper_raw;
-      float beeper;
-      int   left;
-      int   right;
-
-      beeper_raw = zxh_apply_due_audio_events(state);
-      beeper     = zxh_beeper_dc_block(state, beeper_raw);
-
-      sample = slopay_chip_get_sample(state->audio.ay);
-      left   = (int) ((int16_t) ((sample >>  0) & 0xFFFF) * AY_GAIN_WITH_BEEPER + beeper);
-      right  = (int) ((int16_t) ((sample >> 16) & 0xFFFF) * AY_GAIN_WITH_BEEPER + beeper);
-      if (state->audio.muted)
-      {
-        left = right = 0;
-      }
-      else
-      {
-        left  = left  * state->audio.volume / 100;
-        right = right * state->audio.volume / 100;
-      }
-      buf[i * 2 + 0] = CLAMP(left,  INT16_MIN, INT16_MAX);
-      buf[i * 2 + 1] = CLAMP(right, INT16_MIN, INT16_MAX);
-      state->audio.samples_played++;
-    }
-
-    SDL_UnlockMutex(state->audio.queue_mutex);
+    if (volume != 100)
+      for (i = 0; i < npairs * 2; i++)
+        buf[i] = (int16_t) (buf[i] * volume / 100);
 
     chunkbytes = npairs * framebytes;
     SDL_PutAudioStreamData(stream, buf, chunkbytes);
@@ -1405,7 +1075,9 @@ static void zxh_action_toggle_ay_channel(zxh_sdl_state_t *state, int ch)
   char buf[32];
 
   state->audio.ay_channel_muted[ch] = !state->audio.ay_channel_muted[ch];
-  slopay_chip_enable_channel(state->audio.ay, ch, !state->audio.ay_channel_muted[ch]);
+  SDL_LockMutex(state->audio.lock);
+  zxsound_enable_ay_channel(state->audio.sound, ch, !state->audio.ay_channel_muted[ch]);
+  SDL_UnlockMutex(state->audio.lock);
   SDL_snprintf(buf, sizeof(buf), "AY CHANNEL %c %s", "ABC"[ch],
                state->audio.ay_channel_muted[ch] ? "OFF" : "ON");
   zxh_osd_show(state, buf);
@@ -1414,6 +1086,9 @@ static void zxh_action_toggle_ay_channel(zxh_sdl_state_t *state, int ch)
 static void zxh_action_toggle_speaker_mute(zxh_sdl_state_t *state)
 {
   state->audio.speaker_muted = !state->audio.speaker_muted;
+  SDL_LockMutex(state->audio.lock);
+  zxsound_mute_speaker(state->audio.sound, state->audio.speaker_muted);
+  SDL_UnlockMutex(state->audio.lock);
   zxh_osd_show(state, state->audio.speaker_muted ? "SPEAKER MUTE ON" : "SPEAKER MUTE OFF");
 }
 
@@ -1458,6 +1133,9 @@ static void zxh_action_adjust_speed(zxh_sdl_state_t *state, SDL_Keycode sym, int
   }
 
   state->speed = speed;
+  SDL_LockMutex(state->audio.lock);
+  zxsound_set_speed(state->audio.sound, speed);
+  SDL_UnlockMutex(state->audio.lock);
   zxh_update_window_title(state);
 
   SDL_snprintf(buf, sizeof(buf), "SPEED %d PC", speed);
@@ -2145,8 +1823,8 @@ static int zxh_instance_create(zxh_sdl_state_t *state, const zxgame_ops_t *ops, 
   if (state->zx == NULL)
     return 0;
 
-  state->audio.queue_mutex = SDL_CreateMutex();
-  if (state->audio.queue_mutex == NULL)
+  state->audio.lock = SDL_CreateMutex();
+  if (state->audio.lock == NULL)
   {
     fprintf(stderr, "Error: SDL_CreateMutex: %s\n", SDL_GetError());
     return 0;
@@ -2182,8 +1860,7 @@ static int zxh_instance_create(zxh_sdl_state_t *state, const zxgame_ops_t *ops, 
      * not negotiable on every backend -- Emscripten forces it to
      * audioContext.sampleRate -- and the resampler would run on the same
      * main browser thread as the ScriptProcessorNode callback. The AY is
-     * then emulated at that rate directly and the replay cursor counts
-     * sample periods in it (see zxh_apply_due_audio_events).
+     * then emulated at that rate directly.
      */
     state->audio.sample_rate = AY_SAMPLE_RATE;
     if (SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(state->audio.stream),
@@ -2200,19 +1877,19 @@ static int zxh_instance_create(zxh_sdl_state_t *state, const zxgame_ops_t *ops, 
     }
   }
 
-  state->audio.ay = slopay_chip_create(AY_CLOCK_FREQ, state->audio.sample_rate);
-  if (state->audio.ay == NULL)
-    return 0;
-
-  /* Conv: force mono output. The chip defaults to ABC stereo separation
-   * (left = A+B, right = B+C), which sounds right-heavy or left-heavy
-   * depending on which channels a given tune favours; we don't know whether
-   * this game's music assumes ABC, ACB, or no separation at all, so mono
-   * sidesteps the question. Volume is turned down from the chip's own
-   * default (10%) as three channels plus envelope can otherwise clip loud.
+  /* Mono output, duplicated into both channels: zxsound_t puts the AY in mono
+   * mode. The chip defaults to ABC stereo separation (left = A+B, right =
+   * B+C), which sounds right-heavy or left-heavy depending on which channels a
+   * given tune favours; we don't know whether a game's music assumes ABC, ACB,
+   * or no separation at all, so mono sidesteps the question.
    */
-  slopay_chip_set_stereo_mode(state->audio.ay, SLOPAY_CHIP_STEREO_MODE_MONO);
-  slopay_chip_set_volume(state->audio.ay, AY_VOLUME_PCT);
+  state->audio.sound = zxsound_create(state->audio.sample_rate,
+                                      mode_128k ? Z80_CLOCK_128K : Z80_CLOCK_48K,
+                                      SOUND_CUSHION_MS,
+                                      2);
+  if (state->audio.sound == NULL)
+    return 0;
+  zxsound_set_speed(state->audio.sound, state->speed);
 
   SDL_ResumeAudioStreamDevice(state->audio.stream);
 
@@ -2268,8 +1945,8 @@ static void zxh_instance_destroy(zxh_sdl_state_t *state)
   zxspectrum_destroy(state->zx);
 
   SDL_DestroyAudioStream(state->audio.stream);
-  slopay_chip_destroy(state->audio.ay);
-  SDL_DestroyMutex(state->audio.queue_mutex);
+  zxsound_destroy(state->audio.sound);
+  SDL_DestroyMutex(state->audio.lock);
   SDL_DestroyMutex(state->video.dirty_mutex);
 
   if (state->video.crt_enabled)
