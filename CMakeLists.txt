@@ -95,7 +95,7 @@ if(ZXGAME_SDL3)
       include(FetchContent)
       FetchContent_Declare(dptlib_crt
                            GIT_REPOSITORY https://github.com/dpt/DPTLib.git
-                           GIT_TAG 02d30bfd03c47bc70898f4170b77f7f09a2ecd35
+                           GIT_TAG 1d2c9db4dcfdf7b18a35c4100c2d06d9c45814ce
                            SOURCE_SUBDIR libraries/sdl/crt)
       FetchContent_MakeAvailable(dptlib_crt)
     endif()
