@@ -253,6 +253,7 @@ typedef struct zxh_sdl_state
     int             monochrome; // bool; toggled with Ctrl-M, off by default
     int             mellow;     // bool; toggled with Ctrl-N, off by default
     int             show_backbuffer; // bool; toggled with F12, off by default
+    int             border;     // border colour 0..7, set by the game thread
 
     SDL_Window     *window;
 
@@ -450,8 +451,9 @@ static int zxh_key_handler(uint16_t port, void *opaque)
 
 static void zxh_border_handler(int colour, void *opaque)
 {
-  NOT_USED(colour);
-  NOT_USED(opaque);
+  zxh_sdl_state_t *state = opaque;
+
+  state->video.border = colour;
 }
 
 static void zxh_speaker_handler(int on_off, zxclock_t tstates, void *opaque)
@@ -1661,9 +1663,17 @@ static void zxh_sdl_main_loop(void *opaque)
   zxh_sdl_state_t *state = opaque;
   int              x, y, w, h; // destination rect: game view within the window
   int              ww, wh;     // actual window size (may exceed scale*game size in fullscreen)
+  int              border;     // border colour 0..7: GRB bits
+  int              r, g, b;    // border colour, non-bright, 0..255
 
   if (ZXH_FLAG_TEST(state, ZXH_FLAG_QUIT))
     return;
+
+  // ponytail: ignores monochrome and mellow modes
+  border = state->video.border;
+  r      = (border & 2) ? 0xCD : 0x00;
+  g      = (border & 4) ? 0xCD : 0x00;
+  b      = (border & 1) ? 0xCD : 0x00;
 
   w = SCREEN_WIDTH  * state->video.scale;
   h = SCREEN_HEIGHT * state->video.scale;
@@ -1680,6 +1690,7 @@ static void zxh_sdl_main_loop(void *opaque)
     override_pixels = state->video.show_backbuffer ?
                        zxh_build_backbuffer_pixels(state) : NULL;
 
+    crt_set_border(state->video.crt.crt, r / 255.0f, g / 255.0f, b / 255.0f);
     zxh_CRT_shader_render(&state->video.crt, state->video.window, state->zx,
                           x, y, w, h, SCREEN_WIDTH, SCREEN_HEIGHT,
                           &state->video.crt_params,
@@ -1711,9 +1722,8 @@ static void zxh_sdl_main_loop(void *opaque)
       zxspectrum_release_screen(state->zx);
     }
 
-    /* Clear screen */
-    // TODO: This ought to be the border colour, but the game's is always black.
-    SDL_SetRenderDrawColor(state->video.renderer, 0x00, 0x00, 0x00, 0xFF);
+    /* Clear screen to the border colour */
+    SDL_SetRenderDrawColor(state->video.renderer, r, g, b, 0xFF);
     SDL_RenderClear(state->video.renderer);
 
     /* Offset the image */
