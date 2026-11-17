@@ -124,7 +124,7 @@ int zxgame_riscos_main(int argc, char *argv[], const zxgame_ops_t *ops, const zx
   window_load_sprites(app_path("Res:Sprites"));
 
   /* Window creation and event registration */
-  templates_open(app_path("Res:Templates"));
+  (void) templates_open(app_path("Res:Templates"));
 
   // choices init goes here
 
@@ -133,7 +133,7 @@ int zxgame_riscos_main(int argc, char *argv[], const zxgame_ops_t *ops, const zx
   zxgame_icon_bar_init();
   dataxfer_init();
 
-  templates_close();
+  (void) templates_close();
 
   register_event_handlers(1);
 

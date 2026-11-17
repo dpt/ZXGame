@@ -2014,6 +2014,8 @@ void zxgame_fin(void)
 
 static void escape_handler(int type)
 {
+  NOT_USED(type);
+
   LOCALS.escape_pressed = 1;
 
   /* The signal handler will evaporate once used, so install another in case

@@ -67,6 +67,9 @@ void dataxfer_fin(void)
 
 static int message_data_save(wimp_message *message, void *handle)
 {
+  NOT_USED(message);
+  NOT_USED(handle);
+
   return event_HANDLED;
 }
 
